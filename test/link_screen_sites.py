@@ -122,6 +122,7 @@ DECLARED_SITES = frozenset(
         ("memory.py", "MemoryStore.append_history"),
         ("memory.py", "MemoryStore.write_today_history"),
         ("messaging/outbound_files.py", "_inspect"),
+        ("node_modules_txn.py", "_gone"),
         ("platform/policy_distribution.py", "_cache_write_lock"),
         ("platform_compat.py", "ensure_owner_rwx_dirs"),
         ("pod/provision.py", "build_dist"),

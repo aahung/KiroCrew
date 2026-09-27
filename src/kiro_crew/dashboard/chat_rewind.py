@@ -36,7 +36,10 @@ from kiro_crew.dashboard.chat_utils import (
     reject_if_slot_under_construction,
     slot_history_key,
 )
-from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
+from kiro_crew.dashboard.kiro_readiness import (
+    hold_rerun_backend,
+    reject_if_configured_backend_unverified,
+)
 from kiro_crew.dashboard.remote_relay import remote_bound_refusal
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -91,22 +94,12 @@ async def api_chat_slot_rewind(request: web.Request) -> web.Response:
     edited prompt against it. Slot key, title, folder, sidebar position, and
     color are unchanged.
     """
-    # Destructive: this truncates and PERSISTS history before the background
-    # turn runs, so a failed turn cannot undo it. Unlike an ordinary send, the
-    # readiness latch must be honored BEFORE the mutation.
-    blocked = await reject_if_kiro_unverified(request)
-    if blocked is not None:
-        return blocked
     state: DashboardState = request.app["state"]
     name = request.match_info["slot"]
     slot = state._slots.get(name)
     request_app = request.get("app", "")
     if not slot:
         return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
-    under_construction = reject_if_slot_under_construction(state, slot)
-    if under_construction is not None:
-        return under_construction
-
     # App ownership check — mirror fork's contract so apps can't rewind
     # slots they don't own.
     if request_app:
@@ -122,6 +115,17 @@ async def api_chat_slot_rewind(request: web.Request) -> web.Response:
             # 404 (not 403): indistinguishable from a missing slot —
             # anti-enumeration (CWE-204); true reason logged via SEL above.
             return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+
+    under_construction = reject_if_slot_under_construction(state, slot)
+    if under_construction is not None:
+        return under_construction
+    # Resolve the member-aware backend only after the ownership 404. This
+    # still precedes every durable history mutation below.
+    blocked = await reject_if_configured_backend_unverified(
+        request, session_key=effective_session_key(slot)
+    )
+    if blocked is not None:
+        return blocked
 
     # A crew-bound slot has no local rewind: it would rebuild the LOCAL ACP
     # session and re-run the edited turn on this machine, diverging from the peer.
@@ -149,7 +153,20 @@ async def api_chat_slot_rewind(request: web.Request) -> web.Response:
     if len(content) > 32_768:
         return web.json_response({"error": "content too long (max 32768 chars)"}, status=400)
 
-    async with slot._lock:
+    async with hold_rerun_backend(slot), slot._lock:
+        from kiro_crew.dashboard.chat_handlers import _reauthorize_after_await
+
+        stale = _reauthorize_after_await(state, slot, name, request_app, "chat.slot_rewind")
+        if stale is not None:
+            return stale
+        blocked = await reject_if_configured_backend_unverified(
+            request, session_key=effective_session_key(slot)
+        )
+        stale = _reauthorize_after_await(state, slot, name, request_app, "chat.slot_rewind")
+        if stale is not None:
+            return stale
+        if blocked is not None:
+            return blocked
         if slot.running:
             return web.json_response({"error": "slot is running"}, status=409)
         if slot.is_closing:

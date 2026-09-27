@@ -11,9 +11,11 @@ latched value can be arbitrarily stale. That splits the callers in two:
   locked out until something re-probed. These handlers mutate nothing before the
   turn, so a failed turn costs only an error card.
 * **Endpoints that act BEFORE the turn still BLOCK**
-  (:func:`reject_if_kiro_unverified`) — the poll-driven ``kiro-cli`` spawn sites
-  and the destructive reruns. Neither can rely on the ACP attempt as its
-  authority: one has no turn at all, the other has already rewritten durable
+  — the poll-driven ``kiro-cli`` spawn sites use
+  :func:`reject_if_kiro_unverified`; destructive reruns and SDK completions use
+  :func:`reject_if_configured_backend_unverified` to declare their Kiro-only
+  verification scope before consulting that probe. Neither can rely on the ACP
+  attempt as its authority: one has no turn at all, the other has already rewritten durable
   history by the time the turn fails. See
   ``docs/system-specs/modules/acp-client.md`` § "Poll-driven spawn sites are
   readiness-gated".
@@ -21,12 +23,21 @@ latched value can be arbitrarily stale. That splits the callers in two:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+from kiro_crew.agent_sdk.backends import ACP_BACKEND_KIRO
+from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.kiro_prerequisite import KiroPrerequisiteService
+
+if TYPE_CHECKING:
+    from kiro_crew.dashboard.state import _ChatSlot
 
 logger = logging.getLogger(__name__)
 
@@ -252,3 +263,79 @@ async def reject_if_kiro_unverified(request: web.Request) -> web.Response | None
         return None
     _warn_refused_once(_log_safe_path(request))
     return web.json_response(_KIRO_NOT_READY_RESPONSE, status=503)
+
+
+async def reject_if_configured_backend_unverified(
+    request: web.Request,
+    *,
+    session_key: str | None = None,
+    turn_error_translatable: bool = False,
+) -> web.Response | None:
+    """Guard operations whose failure cannot be left to a chat error card.
+
+    Only Kiro CLI has a verified sign-in probe. A foreign binary resolving, or
+    an unrelated Kiro login, cannot authorize a durable history rewrite. Keep
+    these operations explicitly Kiro-only until another backend has a genuine
+    auth-readiness contract. Ordinary sends remain available for every backend.
+    Poll-driven Kiro subprocesses use reject_if_kiro_unverified directly.
+    Slot reruns and SDK completions must pass their effective session key:
+    member DMs can select a different backend from the dashboard default.
+    Completions may opt into post-turn error translation because they rewrite
+    no history before the ACP attempt.
+    """
+    try:
+        config = await asyncio.to_thread(KiroCrewConfig.load)
+        from kiro_crew.members import select_provider_backend
+
+        backend = select_provider_backend(
+            session_key,
+            config.agent.member_acp_backend,
+            config.agent.acp_backend,
+        )
+    except Exception:
+        logger.warning("Could not resolve the configured backend for readiness", exc_info=True)
+        return web.json_response(
+            {
+                "error": "Could not determine the configured agent backend. Retry this operation.",
+                "code": "backend_readiness_unavailable",
+            },
+            status=503,
+        )
+    if backend == ACP_BACKEND_KIRO:
+        return await reject_if_kiro_unverified(request)
+    if turn_error_translatable:
+        return None
+    return web.json_response(
+        {
+            "error": (
+                f"This operation currently requires the Kiro CLI backend: Kiro Crew "
+                f"cannot verify sign-in for the configured backend '{backend}' before "
+                "it runs. You can still send ordinary dashboard messages with this backend."
+            ),
+            "code": "backend_readiness_unsupported",
+        },
+        status=503,
+    )
+
+
+@asynccontextmanager
+async def hold_rerun_backend(slot: _ChatSlot) -> AsyncIterator[None]:
+    """Serialize the rerun's verification and rewrite against dashboard config writes.
+
+    Acquire before the slot lock, matching member routes' config -> slot order.
+    Callers must verify the effective backend INSIDE this hold, after acquiring
+    the slot lock. The early readiness check alone cannot authorize a rewrite.
+    A cancelled handler can leave a registered history worker running; keep the
+    config lock until those writes settle, not just until the handler exits.
+    This is an in-process dashboard boundary, not a lock on external config edits.
+    """
+    from kiro_crew.dashboard.chat_utils import run_to_completion
+    from kiro_crew.dashboard.handlers.agents import _get_config_lock
+
+    async with _get_config_lock():
+        try:
+            yield
+        finally:
+            pending = [write for write in slot._guarded_history_writes if not write.done()]
+            if pending:
+                await run_to_completion(asyncio.gather(*pending, return_exceptions=True))

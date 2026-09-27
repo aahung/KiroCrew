@@ -24,6 +24,7 @@ export function createChatSlotSettingsEndpoints({ post, j }: ClientTransport) {
         effort_supported?: boolean
         effort_levels?: string[]
         model_effort_pair_ids?: boolean
+        history_rerun_supported?: boolean
       }>,
     effortLevels: (slot?: string) =>
       fetch('/api/effort-levels' + (slot ? '?slot=' + encodeURIComponent(slot) : '')).then(j) as Promise<string[]>,

@@ -3115,7 +3115,13 @@ async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
             return data
 
         try:
-            await asyncio.to_thread(update_config_locked, cfg_path, mutate=_mutate_config_patch)
+            from kiro_crew.dashboard.chat_utils import run_to_completion
+
+            # Reruns hold this lock through their history rewrite. A cancelled
+            # PATCH must not release it while its config worker can still commit.
+            await run_to_completion(
+                asyncio.to_thread(update_config_locked, cfg_path, mutate=_mutate_config_patch)
+            )
         except ConfigReadError:
             _log_sel("error", f"{path_key}=read_failed")
             return web.json_response({"error": "failed to read config file"}, status=500)
@@ -3150,6 +3156,26 @@ async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
     applied = live.snapshot()
     if applied is None:
         applied = await asyncio.to_thread(KiroCrewConfig.load)
+    if path_key == "agent.acp_backend":
+        from kiro_crew.kiro_prerequisite import KiroPrerequisiteService
+
+        prerequisite = request.app.get("kiro_prerequisite_service")
+        if (
+            isinstance(prerequisite, KiroPrerequisiteService)
+            and not prerequisite.initial_setup_complete
+        ):
+            try:
+                await prerequisite.record_independent_backend_setup(applied.agent.acp_backend)
+            except Exception:
+                logger.warning("Could not record independent backend setup", exc_info=True)
+                return web.json_response(
+                    {
+                        "error": "Agent selection was saved, but setup completion could not be recorded. Try again.",
+                        "code": "setup_marker_write_failed",
+                        "config_saved": True,
+                    },
+                    status=503,
+                )
     return web.json_response(_masked_config_dict(applied))
 
 

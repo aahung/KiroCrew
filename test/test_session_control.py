@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import re
 import threading
 from pathlib import Path
@@ -22,11 +23,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from chat_test_helpers import _make_state
 
+from kiro_crew import sandbox
 from kiro_crew.config import loader
 from kiro_crew.dashboard import chat_delivery as cd
 from kiro_crew.dashboard import chat_runner as cr
 from kiro_crew.dashboard import create_rate_limit
 from kiro_crew.dashboard import session_control as sc
+from kiro_crew.dashboard import state as state_mod
 from kiro_crew.dashboard import stop_retry
 from kiro_crew.dashboard.chat_utils import slot_history_key
 from kiro_crew.dashboard.handlers import session_control as handlers_sc
@@ -3307,6 +3310,114 @@ def test_created_session_gets_its_workspace_project_dir(tmp_path):
     assert child.project == loader.default_project_dir(child.workspace)
 
 
+# ── session_create: the child inherits its parent's recorded identity ───────
+
+
+def _replace_directory(path: str) -> None:
+    """Swap the directory at *path* for a fresh one: same name, new inode."""
+    os.rename(path, path + ".moved")
+    os.mkdir(path)
+
+
+class TestACreatedChildInheritsItsParentsRecordedIdentity:
+    """A child made from a bound parent never re-pins the directory its parent verified.
+
+    The re-pin at first spawn is for a slot with no record in this process (a
+    restart). A `session_create` child is minted INSIDE the process from a parent
+    whose record is live, so it carries that record with the path; a record-less
+    child would pin whatever stands at the name by its first turn -- after the
+    parent re-bound elsewhere and the old name was replaced, the replacement
+    (review-caught). Derive-or-refuse: a parent without a record leaves the child
+    without one, on the parent's own path; never a fresh pin from the path alone.
+    """
+
+    @staticmethod
+    def _bound_caller(state, tmp_path, monkeypatch, *, recorded: bool):
+        project = str(tmp_path / "proj")
+        os.mkdir(project)
+        monkeypatch.setattr(sc, "default_project_dir", lambda workspace=None: project)
+        caller = _slot(state, "chat-1")
+        caller.project = project
+        if recorded:
+            state_mod.record_project_identity(caller, sandbox.directory_identity_pinned(project))
+        return caller, project
+
+    def test_the_child_carries_the_parents_identity_and_refuses_the_swapped_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """(a) Same record at creation; the directory swapped afterwards is refused, not re-pinned."""
+        state = _make_state(tmp_path)
+        caller, project = self._bound_caller(state, tmp_path, monkeypatch, recorded=True)
+
+        created = asyncio.run(sc.create_session(state, caller_session_key=_key(caller)))
+        child = state.get_slot(created["target"])
+        assert child is not None and child.project == project
+        assert child.project_identity == caller.project_identity
+        assert child.project_identity is not None
+
+        # The parent moves on and the old directory is replaced at its name.
+        caller.project = str(tmp_path / "elsewhere")
+        _replace_directory(project)
+        pins: list[str] = []
+        real_pin = sandbox.directory_identity_pinned
+
+        def _spy(path):
+            pins.append(str(path))
+            return real_pin(path)
+
+        monkeypatch.setattr(sandbox, "directory_identity_pinned", _spy)
+        # The child's spawn verifies against the inherited record: a mismatch is
+        # the governed refusal, and nothing was re-pinned to reach it.
+        identity = asyncio.run(state_mod.spawn_project_identity_repinned(child))
+        assert identity == (child.project_identity[1], child.project_identity[2])
+        with pytest.raises(sandbox.AgentWorkspacePinRefused):
+            sandbox.verify_agent_workspace_for_spawn(child.project, identity)
+        assert pins == []
+
+    def test_a_record_less_parent_leaves_the_child_record_less_on_the_parents_own_path(
+        self, tmp_path, monkeypatch
+    ):
+        """(b) No fresh pin at creation; the child's spawn takes the parent's re-pin-or-refuse path."""
+        state = _make_state(tmp_path)
+        caller, project = self._bound_caller(state, tmp_path, monkeypatch, recorded=False)
+        assert caller.project_identity is None
+
+        created = asyncio.run(sc.create_session(state, caller_session_key=_key(caller)))
+        child = state.get_slot(created["target"])
+        assert child is not None and child.project == project
+        assert child.project_identity is None
+
+        def _refuse(path):
+            raise sandbox.WorkspacePinFailed(
+                f"the project directory {path!r} could not be pinned: planted link"
+            )
+
+        monkeypatch.setattr(sandbox, "directory_identity_pinned", _refuse)
+        with pytest.raises(sandbox.WorkspacePinFailed, match="could not be re-pinned"):
+            asyncio.run(state_mod.spawn_project_identity_repinned(caller))
+        with pytest.raises(sandbox.WorkspacePinFailed, match="could not be re-pinned"):
+            asyncio.run(state_mod.spawn_project_identity_repinned(child))
+
+    def test_a_parent_bound_elsewhere_gives_the_child_no_record(self, tmp_path, monkeypatch):
+        """(c) The child's own project is not the parent's: nothing is copied, nothing pinned."""
+        state = _make_state(tmp_path)
+        caller, project = self._bound_caller(state, tmp_path, monkeypatch, recorded=True)
+        elsewhere = str(tmp_path / "elsewhere")
+        os.mkdir(elsewhere)
+        caller.project = elsewhere
+        state_mod.record_project_identity(caller, sandbox.directory_identity_pinned(elsewhere))
+        pins: list[str] = []
+        monkeypatch.setattr(
+            sandbox, "directory_identity_pinned", lambda path: pins.append(str(path)) or (1, 1)
+        )
+
+        created = asyncio.run(sc.create_session(state, caller_session_key=_key(caller)))
+        child = state.get_slot(created["target"])
+        assert child is not None and child.project == project
+        assert child.project_identity is None
+        assert pins == []
+
+
 # ── session_create: the creator's trust grant ───────────────────────────────
 
 
@@ -4727,10 +4838,10 @@ def test_nothing_suspends_while_the_created_slot_is_half_configured():
         "the folder existence check suspends, so it must precede the caller "
         "re-resolve -- after the re-gate nothing may suspend"
     )
-    # And the filing itself happens inside the synchronous configuration window,
-    # so no caller ever observes the published slot unfiled -- the atomicity
-    # this test requires.
-    filed = src.index("slot.folder_id = folder_id")
+    # And the filing itself -- decided and written by `_file_child_or_retract`,
+    # synchronously -- happens inside the configuration window, so no caller
+    # ever observes the published slot unfiled -- the atomicity this test requires.
+    filed = src.index("_file_child_or_retract(")
     assert publish < filed < configured, (
         "the folder must be assigned between publishing the slot and the end of "
         "its synchronous configuration, or a caller can observe it unfiled"
@@ -5849,3 +5960,94 @@ async def test_a_requeue_onto_a_replaced_slot_is_refused_not_reported_as_sent(
         "a requeue onto a detached slot must be refused as target_moved, not "
         f"reported as delivered: {caught.value.code}"
     )
+
+
+def test_a_child_is_not_filed_where_it_would_inherit_what_its_creator_has_not(tmp_path):
+    """Filing is how a session acquires a folder's binding and steering, and the
+    caller of ``session_create`` is always an agent -- so the child goes through
+    the one filing decision (``chat_folders.filing_crosses_inheritance``): a
+    folder that confers a binding or steering the creator's own placement does
+    not is refused with the move rule's codes and allocates nothing; a child
+    filed beside its creator, under the same binding, lands. The same decision
+    every request-driven filing route takes."""
+    state = _make_state(tmp_path)
+    bound = tmp_path / "bound"
+    bound.mkdir()
+    _folder(state, "fold00000010", "Bound", project_dir=str(bound))
+    _folder(state, "fold00000011", "Under bound", parent_id="fold00000010")
+    _folder(state, "fold00000012", "Steered", steering_dirs=[str(tmp_path)])
+    _folder(state, "fold00000013", "Plain")
+    caller = _slot(state, "chat-1")
+    before = state.live_slot_count()
+
+    with pytest.raises(sc.SessionControlError) as exc:
+        asyncio.run(
+            sc.create_session(state, caller_session_key=_key(caller), folder_id="fold00000011")
+        )
+    assert exc.value.code == "folder_project_dir_forbidden"
+    assert exc.value.status == 403
+    with pytest.raises(sc.SessionControlError) as exc:
+        asyncio.run(
+            sc.create_session(state, caller_session_key=_key(caller), folder_id="fold00000012")
+        )
+    assert exc.value.code == "steering_dirs_forbidden"
+    assert state.live_slot_count() == before, "a refused create must not leave a slot behind"
+
+    plain = asyncio.run(
+        sc.create_session(state, caller_session_key=_key(caller), folder_id="fold00000013")
+    )
+    assert state.get_slot(plain["target"]).folder_id == "fold00000013"
+
+    # The creator already sits under the binding: its child beside it inherits
+    # nothing the creator lacks.
+    inside = _slot(state, "chat-2")
+    inside.folder_id = "fold00000010"
+    beside = asyncio.run(
+        sc.create_session(state, caller_session_key=_key(inside), folder_id="fold00000011")
+    )
+    assert state.get_slot(beside["target"]).folder_id == "fold00000011"
+
+
+def test_a_child_is_not_filed_while_a_folder_write_is_in_flight(tmp_path, monkeypatch):
+    """The filing decision runs again ADJACENT to the child's assignment, in the
+    synchronous window that configures the slot (``_file_child_or_retract``).
+    The live tree is the committed tree unless a folder write is in flight, whose
+    provisional state would be observable there -- so with the store lock held at
+    that instant the filing is refused, retryable, and the freshly minted child is
+    retracted rather than left behind unfiled. Red-first: the assignment ran
+    unconditionally and the child stayed."""
+    state = _make_state(tmp_path)
+    _folder(state, "fold00000030", "Plain")
+    caller = _slot(state, "chat-1")
+    before = state.live_slot_count()
+
+    class _HeldAtTheWrite:
+        """The real lock for the early gate's read; reports held at the write."""
+
+        def __init__(self, real):
+            self._real = real
+            self.asked = 0
+
+        def locked(self) -> bool:
+            self.asked += 1
+            return True
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        async def __aenter__(self):
+            return await self._real.__aenter__()
+
+        async def __aexit__(self, *exc):
+            return await self._real.__aexit__(*exc)
+
+    held = _HeldAtTheWrite(state._folders_lock)
+    monkeypatch.setattr(state, "_folders_lock", held)
+    with pytest.raises(sc.SessionControlError) as exc:
+        asyncio.run(
+            sc.create_session(state, caller_session_key=_key(caller), folder_id="fold00000030")
+        )
+    assert exc.value.code == "folder_store_busy"
+    assert exc.value.status == 409
+    assert held.asked >= 1
+    assert state.live_slot_count() == before, "a refused filing must retract the child"

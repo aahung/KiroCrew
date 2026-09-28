@@ -12817,7 +12817,12 @@
         "warm_pool": "वॉर्म पूल",
         "warm_pool_description": "सत्र तुरंत शुरू करने के लिए ACP CLI प्रक्रियाएँ पहले से चालू करें।",
         "workspace": "वर्कस्पेस",
-        "workspaces": "वर्कस्पेस"
+        "workspaces": "वर्कस्पेस",
+        "new_workspace": "नया वर्कस्पेस",
+        "change_directory": "डायरेक्टरी बदलें",
+        "delete_workspace_warning": "इसकी मेमोरी, सबक, इतिहास और नॉलेज बेस अब उपयोग नहीं होते। फ़ोल्डर डिस्क पर बना रहता है।",
+        "type_workspace_name_to_confirm": "पुष्टि के लिए “{{name}}” टाइप करो",
+        "change_directory_hint": "वर्कस्पेस अपनी मेमोरी, सबक, इतिहास और नॉलेज बेस नए फ़ोल्डर से पढ़ेगा। कुछ भी स्थानांतरित नहीं होता।"
       },
       "mcpTab": {
         "actions": "कार्रवाइयाँ",
@@ -14978,6 +14983,8 @@
         "desktop_alerts": "डेस्कटॉप सूचनाएँ",
         "notify_when_a_background_chat_finishes": "बैकग्राउंड चैट पूरी होने पर सूचित करें",
         "notify_when_a_background_chat_finishes_description": "जो चैट पूरी हुई उसका नाम बताते हुए सिस्टम सूचना दिखाता है, लेकिन सिर्फ़ तब जब यह विंडो मिनिमाइज़ हो या किसी दूसरे ऐप के पीछे हो।",
+        "unread_only_when_done_or_waiting": "सेशन को अनपढ़ा तभी चिह्नित करो जब उसे तुम्हारी ज़रूरत हो",
+        "unread_only_when_done_or_waiting_description": "बैकग्राउंड सेशन हर नए संदेश पर नहीं, बल्कि तभी अनपढ़ा चिह्नित होता है जब एजेंट काम पूरा कर ले या तुम्हारे जवाब का इंतज़ार करे।",
         "always_interrupts_cannot_be_muted_or_lowered": "हमेशा टोकता है — इसे म्यूट या कम नहीं किया जा सकता",
         "app": "app",
         "category_agent": "एजेंट के अपने आप भेजे गए संदेश",
@@ -16535,6 +16542,9 @@
       "webview_refresh_error_aged": "डैशबोर्ड ताज़ा नहीं किया जा सका। {{ago}} का संस्करण दिखाया जा रहा है।",
       "webview_frame_title": "{{crew}} द्वारा भरा गया डैशबोर्ड",
       "webview_rendering": "डैशबोर्ड रेंडर हो रहा है…",
+      "webview_docked_rendering": "स्टेटस कार्ड रेंडर हो रहा है…",
+      "webview_docked_error": "इस क्रूमेट का स्टेटस कार्ड रेंडर नहीं किया जा सका। पूरा डैशबोर्ड शायद अब भी नीचे से खुल सकता है।",
+      "webview_docked_refresh_error": "स्टेटस कार्ड रीफ़्रेश नहीं हो सका। आख़िरी लोड हुआ संस्करण दिखाया जा रहा है।",
       "webview_retry": "पुन: प्रयास करें",
       "deploy_trigger": "क्लाउड",
       "deploy_title": "क्लाउड में तुम्हारा क्रू",

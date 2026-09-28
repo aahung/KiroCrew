@@ -12630,7 +12630,12 @@
         "warm_pool": "ウォームプール",
         "warm_pool_description": "ACP CLI プロセスを事前起動し、セッションを即時に開始します。",
         "workspace": "ワークスペース",
-        "workspaces": "ワークスペース"
+        "workspaces": "ワークスペース",
+        "new_workspace": "新しいワークスペース",
+        "change_directory": "ディレクトリを変更",
+        "delete_workspace_warning": "メモリ、レッスン、履歴、ナレッジベースは使われなくなります。フォルダーはディスクに残ります。",
+        "type_workspace_name_to_confirm": "確認のため「{{name}}」と入力してください",
+        "change_directory_hint": "ワークスペースは新しいフォルダーからメモリ、レッスン、履歴、ナレッジベースを読み込みます。何も移動されません。"
       },
       "mcpTab": {
         "actions": "アクション",
@@ -14753,6 +14758,8 @@
         "desktop_alerts": "デスクトップ通知",
         "notify_when_a_background_chat_finishes": "バックグラウンドのチャットが完了したら通知する",
         "notify_when_a_background_chat_finishes_description": "完了したチャットの名前を含むシステム通知を表示します。ただし、このウィンドウが最小化されているか他のアプリの背後にあるときのみです。",
+        "unread_only_when_done_or_waiting": "対応が必要なときだけセッションを未読にする",
+        "unread_only_when_done_or_waiting_description": "バックグラウンドのセッションは、新しいメッセージのたびではなく、エージェントが完了したときや回答を待っているときだけ未読になります。",
         "always_interrupts_cannot_be_muted_or_lowered": "常に割り込み — ミュートまたは低下させることはできません",
         "app": "アプリ",
         "category_agent": "エージェントからの自発的なメッセージ",
@@ -16296,6 +16303,9 @@
       "webview_refresh_error_aged": "ダッシュボードを更新できませんでした。{{ago}}の版を表示しています。",
       "webview_frame_title": "{{crew}} が記入したダッシュボード",
       "webview_rendering": "ダッシュボードを描画しています…",
+      "webview_docked_rendering": "ステータスカードを描画しています…",
+      "webview_docked_error": "このクルーメイトのステータスカードを描画できませんでした。完全なダッシュボードは下からまだ開ける可能性があります。",
+      "webview_docked_refresh_error": "ステータスカードを更新できませんでした。最後に読み込んだバージョンを表示しています。",
       "webview_retry": "再試行",
       "deploy_trigger": "クラウド",
       "deploy_title": "クラウド上のクルー",

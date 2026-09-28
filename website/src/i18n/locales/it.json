@@ -13004,7 +13004,12 @@
         "warm_pool": "Pool caldo",
         "warm_pool_description": "Pre-avvia i processi ACP CLI per un avvio istantaneo della sessione.",
         "workspace": "Workspace",
-        "workspaces": "Workspace"
+        "workspaces": "Workspace",
+        "new_workspace": "Nuovo workspace",
+        "change_directory": "Cambia directory",
+        "delete_workspace_warning": "Memoria, lezioni, cronologia e knowledge base non vengono più usate. La cartella resta sul disco.",
+        "type_workspace_name_to_confirm": "Digita «{{name}}» per confermare",
+        "change_directory_hint": "Il workspace leggerà memoria, lezioni, cronologia e knowledge base dalla nuova cartella. Non viene spostato nulla."
       },
       "mcpTab": {
         "actions": "Azioni",
@@ -15203,6 +15208,8 @@
         "desktop_alerts": "Avvisi desktop",
         "notify_when_a_background_chat_finishes": "Avvisa quando una chat in background termina",
         "notify_when_a_background_chat_finishes_description": "Mostra una notifica di sistema con il nome della chat terminata, ma solo mentre questa finestra è ridotta a icona o dietro un’altra app.",
+        "unread_only_when_done_or_waiting": "Segna le sessioni come non lette solo quando hanno bisogno di te",
+        "unread_only_when_done_or_waiting_description": "Una sessione in background viene segnata come non letta quando il suo agente finisce o aspetta la tua risposta, non a ogni nuovo messaggio.",
         "always_interrupts_cannot_be_muted_or_lowered": "Interrompe sempre — non può essere silenziato né abbassato",
         "app": "app",
         "category_agent": "Messaggi proattivi dell’agente",
@@ -16774,6 +16781,9 @@
       "webview_refresh_error_aged": "Non è stato possibile aggiornare la dashboard. Viene mostrata la versione di {{ago}}.",
       "webview_frame_title": "Dashboard compilata da {{crew}}",
       "webview_rendering": "Rendering della dashboard…",
+      "webview_docked_rendering": "Rendering della scheda di stato…",
+      "webview_docked_error": "Non è stato possibile rendere la scheda di stato di questo compagno. La dashboard completa potrebbe comunque aprirsi qui sotto.",
+      "webview_docked_refresh_error": "Impossibile aggiornare la scheda di stato. Viene mostrata l'ultima versione caricata.",
       "webview_retry": "Riprova",
       "deploy_trigger": "Cloud",
       "deploy_title": "La tua crew nel cloud",

@@ -13004,7 +13004,12 @@
         "warm_pool": "Pool préchauffé",
         "warm_pool_description": "Pré-lance des processus ACP CLI pour un démarrage de session instantané.",
         "workspace": "Espace de travail",
-        "workspaces": "Espaces de travail"
+        "workspaces": "Espaces de travail",
+        "new_workspace": "Nouvel espace de travail",
+        "change_directory": "Changer de répertoire",
+        "delete_workspace_warning": "Sa mémoire, ses leçons, son historique et sa base de connaissances ne sont plus utilisés. Le dossier reste sur le disque.",
+        "type_workspace_name_to_confirm": "Saisis « {{name}} » pour confirmer",
+        "change_directory_hint": "L'espace de travail lira sa mémoire, ses leçons, son historique et sa base de connaissances dans le nouveau dossier. Rien n'est déplacé."
       },
       "mcpTab": {
         "actions": "Actions",
@@ -15203,6 +15208,8 @@
         "desktop_alerts": "Alertes du bureau",
         "notify_when_a_background_chat_finishes": "Prévenir lorsqu’un chat en arrière-plan se termine",
         "notify_when_a_background_chat_finishes_description": "Affiche une notification système nommant le chat qui vient de se terminer, mais seulement lorsque cette fenêtre est réduite ou masquée par une autre application.",
+        "unread_only_when_done_or_waiting": "Marquer les sessions comme non lues seulement quand elles ont besoin de toi",
+        "unread_only_when_done_or_waiting_description": "Une session en arrière-plan est marquée comme non lue quand son agent a terminé ou attend ta réponse, et non à chaque nouveau message.",
         "always_interrupts_cannot_be_muted_or_lowered": "Interrompt toujours — impossible de mettre en sourdine ou d’abaisser la priorité",
         "app": "app",
         "category_agent": "Messages proactifs de l’agent",
@@ -16774,6 +16781,9 @@
       "webview_refresh_error_aged": "Le tableau de bord n'a pas pu être actualisé. La version de {{ago}} est affichée.",
       "webview_frame_title": "Tableau de bord rempli par {{crew}}",
       "webview_rendering": "Affichage du tableau de bord…",
+      "webview_docked_rendering": "Affichage de la carte d'état…",
+      "webview_docked_error": "La carte d'état de ce coéquipier n'a pas pu être affichée. Le tableau de bord complet peut encore s'ouvrir ci-dessous.",
+      "webview_docked_refresh_error": "Impossible d'actualiser la carte d'état. Affichage de la dernière version chargée.",
       "webview_retry": "Réessayer",
       "deploy_trigger": "Cloud",
       "deploy_title": "Ton équipe dans le cloud",

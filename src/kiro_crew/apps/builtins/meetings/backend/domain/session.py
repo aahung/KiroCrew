@@ -1004,8 +1004,7 @@ _TOPIC_QUALIFIER = (
     r"(?:retro|sync|notes|kickoff|deep\s+dive|review)\s+on)"
 )
 _SYSTEM_PROMPT_TOPIC_RE = re.compile(
-    rf"(?:{_TOPIC_QUALIFIER}\s+)?system\s*prompt\s+{_TOPIC_NOUNS}"
-    rf"(?:\s+{_TOPIC_NOUNS})?",
+    rf"(?:{_TOPIC_QUALIFIER}\s+)?system\s*prompt\s+{_TOPIC_NOUNS}" rf"(?:\s+{_TOPIC_NOUNS})?",
     re.IGNORECASE,
 )
 
@@ -1056,7 +1055,9 @@ def _screened_field(
 
 def _context_lines(meta: dict[str, Any]) -> list[str]:
     """The screened body lines of the calendar fence."""
-    parts = [f"Meeting: {_screened_field(meta.get('title') or 'Meeting', 'title', meta, topic_title=True)}"]
+    parts = [
+        f"Meeting: {_screened_field(meta.get('title') or 'Meeting', 'title', meta, topic_title=True)}"
+    ]
     if meta.get("description"):
         parts.append(f"Description: {_screened_field(meta['description'], 'description', meta)}")
     attendees = meta.get("attendees") or []

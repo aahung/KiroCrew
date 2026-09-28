@@ -3922,12 +3922,14 @@ function ChatInput({
           approval bar, the notices, the composer and the collapsed bar, so a bar
           fused to the composer's top shares its pane instead of meeting it at a
           seam; it is always mounted so an approval landing never remounts the
-          editor. It carries the composer halo at rest and the approval glow
-          while a decision is pending (both are box-shadows, so one at a time). */}
+          editor. It wears the same neutral `glass-shadow` as every other glass
+          pane (focus = the material's own tint + edge step, no theme color), and
+          adds the approval glow while a decision is pending: the glow takes the
+          shadow slot, the tint + edge focus step stays on. */}
       <Glass
         radius={16}
         data-testid="composer-dock"
-        className={hasApproval ? 'approval-glow' : `composer-halo${memoryMode === 'temporary' ? ' composer-halo-aim' : memoryMode === 'incognito' ? ' composer-halo-warn' : ''}`}
+        className={hasApproval ? 'glass-shadow approval-glow' : 'glass-shadow'}
       >
       <AnimatePresence>
         {pendingApproval && approvalId && (
@@ -4228,17 +4230,12 @@ function ChatInput({
         animate={{ opacity: 1, height: 'auto' }}
         exit={{ opacity: 0, height: 0 }}
         transition={{ type: 'spring', damping: 26, stiffness: 280, mass: 0.7 }}
-        // The halo lives on THIS element, not on the bordered wrapper inside it:
-        // this element clips its content for the height:0 exit, and a child's
-        // box-shadow is content, so a halo drawn one level down is cut at the
-        // edge. An element's own shadow is outside its overflow clip. Radius
-        // mirrors the wrapper's so the halo hugs the same corners. With an
-        // approval box attached above, the wrapper has no top radius and the
-        // approval glow already lights the pair, so the halo stands down.
-        // Incognito and temporary modes paint the wrapper's border warn / aim
-        // at all times; the focus halo takes the same color there so the one
-        // control lights up in one color instead of an accent ring around a
-        // warn or aim edge.
+        // This element clips its content for the height:0 exit, and it paints
+        // no shadow or focus cue of its own: both belong to the Glass dock pane
+        // that wraps it (`.glass-shadow`, index.css) — the shadow is outside this
+        // clip, and focus is the pane's own tint + edge step, no theme color.
+        // With an approval box attached above, that pane wears `approval-glow`,
+        // whose warn glow takes the shadow slot while the focus step stays.
         style={{ overflow: 'hidden' }}
       >{/* File drag-and-drop target. Drag-drop is inherently pointer-only; the
            keyboard-accessible path is the "Attach files" button that opens the
@@ -4247,7 +4244,7 @@ function ChatInput({
       <div
         data-testid="input-wrapper"
         ref={wrapperRef}
-        className={`${hasApproval ? 'rounded-b-2xl rounded-t-none' : 'rounded-2xl'} relative transition-colors overflow-hidden ${manualHeight !== null ? 'flex flex-col min-h-0' : ''} ${(memoryMode === 'incognito' || memoryMode === 'temporary') ? 'border-2' : 'border'} bg-transparent ${memoryMode === 'temporary' ? 'border-aim' : memoryMode === 'incognito' ? 'border-warn' : 'border-transparent focus-within:border-accent/50'}`}
+        className={`${hasApproval ? 'rounded-b-2xl rounded-t-none' : 'rounded-2xl'} relative transition-colors overflow-hidden ${manualHeight !== null ? 'flex flex-col min-h-0' : ''} ${(memoryMode === 'incognito' || memoryMode === 'temporary') ? 'border-2' : 'border'} bg-transparent ${memoryMode === 'temporary' ? 'border-aim' : memoryMode === 'incognito' ? 'border-warn' : 'border-transparent'}`}
 
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
@@ -4380,7 +4377,7 @@ function ChatInput({
           data-composer-typo
           // Chromium paints no `text-overflow` on a `::placeholder`, so the cut tail
           // fades out instead, the way the app's other cut edges do.
-          className={/* focus-cue-ok: the cue is the composer shell's focus-within border-accent brightening; a second ring on the textarea would double-paint one control. */ `relative w-full bg-transparent border-none ${INPUT_TYPO} text-text outline-hidden min-h-[44px] max-h-[50vh] placeholder:text-muted resize-none ${placeholderIsHint ? 'placeholder:whitespace-nowrap placeholder:overflow-hidden placeholder:[mask-image:linear-gradient(to_right,black_calc(100%-1.5rem),transparent)] placeholder:[-webkit-mask-image:linear-gradient(to_right,black_calc(100%-1.5rem),transparent)]' : ''} ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
+          className={/* focus-cue-ok: the cue is the dock pane's `.glass-shadow:focus-within` step (brighter tint + darker side lines, index.css); a second ring on the textarea would double-paint one control. */ `relative w-full bg-transparent border-none ${INPUT_TYPO} text-[var(--glass-text)] outline-hidden min-h-[44px] max-h-[50vh] placeholder:text-[var(--glass-placeholder)] resize-none ${placeholderIsHint ? 'placeholder:whitespace-nowrap placeholder:overflow-hidden placeholder:[mask-image:linear-gradient(to_right,black_calc(100%-1.5rem),transparent)] placeholder:[-webkit-mask-image:linear-gradient(to_right,black_calc(100%-1.5rem),transparent)]' : ''} ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
           style={manualHeight !== null ? { height: '100%' } : undefined}
           placeholder={activePlaceholder}
           readOnly={optimizing}
@@ -4472,8 +4469,11 @@ function ChatInput({
           </div>
         )}
 
-        {/* Bottom icon row */}
-        <div className="flex items-center justify-between px-2.5 pb-2 pt-0.5">
+        {/* Bottom icon row. `glass-toolbar` (index.css) is the gradient scrim
+            under it: the pane's own colour, solid at the bottom edge, nothing
+            at the top, so what scrolls under the dock never shows through the
+            control labels. */}
+        <div className="glass-toolbar flex items-center justify-between px-2.5 pb-2 pt-0.5">
           <div className="flex items-center gap-0.5 min-w-0">
             {onUploadFiles && (
               <div className="relative shrink-0" ref={plusWrapRef}>

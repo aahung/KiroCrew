@@ -48,10 +48,10 @@ from kiro_crew.messaging.link import is_channel_session_key
 from kiro_crew.messaging.privacy_mode import hydrate as _hydrate_conv_flags
 from kiro_crew.messaging.privacy_mode import is_incognito as is_thread_incognito
 from kiro_crew.messaging.privacy_mode import is_temporary as is_thread_temporary
-from kiro_crew.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
+from kiro_crew.security import is_sensitive_path, redact_control_split
 from kiro_crew.skill_trust import is_project_trusted as _is_project_trusted
 from kiro_crew.skills import _trusted_skill_roots, skills_dir
-from kiro_crew.terminal_safe import normalize_for_scanning, strip_control_characters
+from kiro_crew.terminal_safe import strip_control_characters
 
 if TYPE_CHECKING:
     from kiro_crew.execution_context import ExecutionContext
@@ -88,20 +88,14 @@ def _scrub_text(val: str) -> str:
     an invisible character can destroy a boundary a pattern requires, so a token the
     stored text matches can stop matching once the copy is joined up.
     """
-    out, _ = redact_exfiltration_urls(val)
-    out, _ = redact_credentials(out)
-    stripped = strip_control_characters(out)
-    if stripped != out:
-        out, _ = redact_exfiltration_urls(stripped)
-        out, _ = redact_credentials(out)
-    normalised = normalize_for_scanning(out)
-    if normalised == out:
-        return out
-    scanned, _ = redact_exfiltration_urls(normalised)
-    scanned, _ = redact_credentials(scanned)
-    if scanned == normalised:
-        return out
-    return scanned
+    # redact_control_split closes the control-split bypass with byte fidelity (it
+    # returns the original bytes with only credential/URL spans replaced, scanning a
+    # normalised copy and mapping the spans back). strip_control_characters then drops
+    # the control bytes it left in place, because this is a memory-field egress: a
+    # stored note carrying live terminal-escape bytes must not reach a renderer, even
+    # when it holds no credential. Tab, newline and carriage return are content and
+    # survive both steps.
+    return strip_control_characters(redact_control_split(val))
 
 
 #: Deepest JSON nesting this scrub walks. A stored memory payload is a handful of levels

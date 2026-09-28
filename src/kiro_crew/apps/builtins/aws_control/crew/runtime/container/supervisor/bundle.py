@@ -13,14 +13,19 @@ name. ``config_dir()`` and ``data_home()`` resolve to the SAME directory, so a
 
 * ``agent.json`` -> ``<kiro home>/agents/<crew_name>.json``.
   ``agent_discovery.list_agents`` is THE reader of installed agent specs, keyed by
-  the spec's ``name``, and it reads and JSON-parses every ``~/.kiro/agents/*.json``
+  the spec's ``name``, and it reads and JSON-parses every ``<kiro home>/agents/*.json``
   on each call. The gateway resolves that directory as ``kiro_home() / "agents"``,
-  where ``kiro_home()`` is ``$KIRO_HOME`` or ``~/.kiro``. It is NOT under the data
-  home and NOT governed by ``KIROCREW_HOME``: the backend is launched with
-  ``KIROCREW_HOME=data_home`` but no ``KIRO_HOME`` (``supervisor/backend.py``),
-  so the spec lands under the process HOME. Resolved here the same way rather
-  than imported, so this module needs no ``kiro_crew`` install (matching the
-  supervisor's other minimal, import-free config reads).
+  where ``kiro_home()`` is ``$KIRO_HOME`` or ``~/.kiro``. It is NOT governed by
+  ``KIROCREW_HOME``. The supervisor exports ``KIRO_HOME=<data home>/kiro``
+  (``supervisor.__main__.export_kiro_home``) before calling this module, so the spec
+  lands in a directory the task owns, beside the default spec the backend writes
+  there. It must NOT land in the process HOME's shared ``~/.kiro/agents``: the
+  backend runs on a non-default data home and Kiro Crew refuses to write the shared
+  dir from one, so a spec landing there leaves the backend with no ``kirocrew.json``
+  and every turn dies. Resolved here from the environment the way kiro-cli does
+  rather than
+  imported, so this module needs no ``kiro_crew`` install (matching the supervisor's
+  other minimal, import-free config reads).
 
   The gateway's chain reaches that path through a private override-BLIND helper,
   which ``test_host_isolation_floor.py::test_the_ambient_resolver_has_exactly_one_caller``
@@ -78,16 +83,44 @@ BUNDLE_ENTRIES: tuple[tuple[str, str], ...] = (
 #: logs; T4's gate proves the crew from the image digest, not from this file.
 INSTALLED_MARKER = ".smc-crew-installed.json"
 
+#: Crew names this container refuses, because Kiro Crew generates a spec of its own at
+#: each of these filenames in the agents directory and rewrites it at every boot without
+#: reading who wrote what. A crew installed at one of them is replaced before the first
+#: turn, silently.
+#:
+#: MIRRORED from ``kiro_crew.agent_files.OWNED_KIRO_AGENT_FILES``, not imported, for the
+#: same reason the agents-dir resolver above is mirrored: this tree is image source and
+#: must stay importable with no ``kiro_crew`` present. The copy is pinned to the original
+#: by a test, so a new managed spec reds CI here rather than silently narrowing the set.
+RESERVED_CREW_NAMES: frozenset[str] = frozenset(
+    {
+        "kirocrew",
+        "kirocrew-lite",
+        "kirocrew-guest",
+        "kirocrew-conductor",
+        "kirocrew-pipeline-conductor",
+        "kirocrew-ledger-conductor",
+        "kirocrew-security-conductor",
+        "kirocrew-worker",
+        "kirocrew-knowledge",
+        "kirocrew-research",
+        "kirocrew-heartbeat",
+    }
+)
+
 
 def default_kiro_agents_dir() -> Path:
     """Where kiro-cli reads agent specs: ``<kiro home>/agents``.
 
-    Mirrors ``kiro_crew.config.paths.kiro_home`` (``config/paths.py:510``):
-    ``$KIRO_HOME`` if set, else ``~/.kiro``, then ``/agents``. Deliberately NOT
-    under the data home -- see the module docstring. The one behaviour not
-    mirrored is ``kiro_home``'s rejection of a system-directory ``$KIRO_HOME``;
-    that guards a pathological override the container never sets, and copying it
-    would only widen this module's surface.
+    Mirrors ``kiro_crew.config.paths.kiro_home``: ``$KIRO_HOME`` if set, else
+    ``~/.kiro``, then ``/agents``. In the container ``$KIRO_HOME`` is always set, by
+    ``supervisor.__main__.export_kiro_home``, which also asserts that this function
+    answers the directory the task owns -- so a drift between the two spellings fails
+    at boot instead of installing the crew where nothing serves it.
+
+    The one behaviour not mirrored is ``kiro_home``'s rejection of a system-directory
+    ``$KIRO_HOME``; the value is derived from ``SMC_DATA_HOME`` rather than passed
+    through, and copying the check would only widen this module's surface.
     """
     override = os.environ.get("KIRO_HOME")
     home = Path(override).expanduser() if override else Path.home() / ".kiro"
@@ -643,6 +676,24 @@ def install_bundle(settings: Settings, *, agents_dir: Path | None = None) -> dic
     # test can fail is a comment claiming a property nobody verifies, so it is gone rather
     # than shipped. If the join ever changes shape, the check to add back is the one that
     # can be tested against the new shape.
+    #
+    # A name inside ``agents`` can still be the WRONG name: Kiro Crew generates its own
+    # specs in this directory and rewrites them at every boot, without reading who wrote
+    # what. A crew occupying one of those filenames is therefore installed, digest-checked,
+    # and then replaced by the generated spec before the first turn -- so the container
+    # serves a different prompt and a different tool surface than the bundle attested, with
+    # nothing in the logs saying so. Refused rather than detected: the swap happens inside
+    # the backend's own boot, after this process has finished, so there is no later point
+    # where refusing is still cheap.
+    if manifest_crew in RESERVED_CREW_NAMES:
+        raise common.ConfigError(
+            f"bundle check failed [crew name is not reserved]: crew_name={manifest_crew!r} "
+            f"is a name Kiro Crew generates a spec for in this directory and rewrites at "
+            f"every boot, so the crew's own spec would be replaced by the generated one "
+            f"before the first turn and the task would answer with a different agent than "
+            f"the bundle digest attested. Re-export the crew under a name outside "
+            f"{sorted(RESERVED_CREW_NAMES)} and set SMC_CREW_NAME to match."
+        )
     agent_dst = agents / f"{manifest_crew}.json"
     # Copy the validated bytes rather than re-serialising, so what kiro-cli reads
     # is exactly what the digest covered -- through a no-follow open so a symlink

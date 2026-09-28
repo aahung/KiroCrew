@@ -239,7 +239,7 @@ describe('create-button caret menu', () => {
     // the menu simply failed to open.
     await screen.findByText('New autopilot chat')
     const item = screen.getByTestId('open-crew-members')
-    expect(item.textContent).toContain('Crew Members')
+    expect(item.textContent).toContain('Crewmates')
     // The retired ingress and its experimental tag are gone, not merely hidden.
     expect(screen.queryByTestId('new-crew-chat')).toBeNull()
     expect(screen.queryByText('New Crew Mode chat')).toBeNull()

@@ -3665,7 +3665,7 @@
     "settings": "Settings",
     "task_runner": "Task Runner",
     "webhooks": "Webhooks",
-    "crew_members": "Crew Members"
+    "crew_members": "Crewmates"
   },
   "pages": {
     "aidlc": {
@@ -4811,7 +4811,7 @@
       "columns_load_failed": "Could not load board columns",
       "folder_update_failed": "Folder update failed",
       "board_update_failed": "Board update failed",
-      "open_crew_members": "Crew Members",
+      "open_crew_members": "Crewmates",
       "open_crew_members_desc": "Opens the Crew Members page — each member is a standing agent with its own thread.",
       "open_crew_members_gated_desc": "Opens Settings first, to turn this preview on — the page is not available until you do.",
       "model_list_failed": "Couldn't load the model list. What's shown may be incomplete or out of date.",
@@ -7249,7 +7249,7 @@
           "crew_where": "“Crew Members” appears in the sidebar under Sessions once this is on; the New menu’s entry opens it, or this card while off.",
           "crew_media_members": "The Crew Members page, with one member selected and its activity panel open."
         },
-        "crew_members": "Crew Members",
+        "crew_members": "Crewmates",
         "crew_members_desc": "The Crew Members page: every agent you have, each with its own thread. Still being built, so it is not offered until you turn this on.",
         "decisions": "Decisions (Jev)",
         "decisions_desc": "Jev is a small, fast decision model. With this on, {{productName}} asks Jev which one of your skills fits the message you just sent — or that none does — and uses Jev's pick for the share of your sessions shown under the switch; the rest keep the word-matching rule this build ships with. If Jev is slow, unreachable or answers with nothing usable, that message falls back to the same rule, so a decision never holds up your reply. Each call is also recorded in a log on the machine that runs {{productName}}, for diagnostics. This switch is saved on the machine that runs {{productName}}, not in this browser, so it applies on every device you open it from.",

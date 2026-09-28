@@ -53,6 +53,52 @@ BACKEND_HOST = "127.0.0.1"
 # process would be a name another system copies by hand.
 CONTROL_SECRET_HEADER = "X-SMC-Control-Secret"
 
+# The namespace every installed crew spec lives in, as a filename stem AND as the
+# spec's declared ``name``. Kiro Crew derives specs of its own into the same directory
+# -- ``kirocrew.json``, ``kirocrew-lite.json`` and the ``kirocrew-worker.json`` mirror
+# it rebuilds from the default -- and a crew called ``kirocrew-worker`` is not
+# hypothetical: it is the crew this deployment ships. Without a namespace the install
+# lands ON the mirror, and the next spawn-path re-derivation replaces the shared crew's
+# prompt and tools with Kiro Crew's own, with no error.
+#
+# The prefix is on BOTH the filename and the declared name because those are two
+# different resolutions and only one of them dispatches. kiro-cli enumerates agents by
+# the spec's DECLARED name, and Kiro Crew's snapshot of dispatchable agents does the
+# same, so a file named ``crew-x.json`` whose spec still declares ``x`` is reachable
+# under neither id: ``x`` is now declared TWICE (by the crew and by the mirror) and is
+# refused as ambiguous, while ``crew-x`` is declared by nothing and falls back to the
+# default agent -- the silent-default failure the bundle install exists to prevent.
+# Measured against ``acp/kas_agents.load_agent_spec`` and
+# ``config.loader._scan_materialized_agents``, not inferred.
+#
+# ``crew-`` is free by construction: every spec Kiro Crew manages is named
+# ``kirocrew*`` (``kiro_crew/agent_files.py``), and no KAS built-in id begins with it.
+# That tree is not importable here (the container installs no ``kiro_crew``), so the
+# two definitions are pinned together by a test instead, the way the agents-dir
+# resolver already is.
+CREW_AGENT_ID_PREFIX = "crew-"
+
+# ``_AGENT_NAME_RE`` in ``kiro_crew/validation.py`` caps a dispatchable agent name at 64
+# characters. Mirrored rather than imported, for the same reason as the prefix above.
+MAX_CREW_AGENT_ID_LEN = 64
+
+
+def crew_agent_id(crew_name: str) -> str:
+    """The agent id a crew is dispatched under: its name inside the crew namespace.
+
+    Pure, and deliberately the only place the mapping is spelled: the supervisor
+    INSTALLS the crew's spec under this id and the front ADDRESSES it under this id,
+    and a deployment where those two disagree serves a default agent while reporting
+    a healthy install. The customer-facing address is unchanged -- a caller still
+    names the crew -- so this never appears in the API.
+
+    Not validated here. Whether the id can name an agent at all is decided once, at
+    install time, where a refusal stops the boot; see ``bundle.install_bundle``. A
+    per-request check would answer the same question in the place where the only
+    available answer is a 500.
+    """
+    return f"{CREW_AGENT_ID_PREFIX}{crew_name}"
+
 
 class ConfigError(ValueError):
     """Raised when the environment is wrong in a way that must not be repaired.

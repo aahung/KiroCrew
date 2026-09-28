@@ -902,14 +902,22 @@ def test_every_read_and_the_write_sit_in_one_critical_section(tmp_path, monkeypa
     # it hashes the bytes this derivation already mirrored. A stamp that went back to the
     # file would be a separate observation, so it could record a fingerprint for a
     # generation the spec on disk does not mirror.
+    #
+    # The mirror is read ONCE too, first, and both things the writer needs from that file
+    # come out of the one parse: whether it is this derivation's to overwrite at all
+    # (a shared crew parked on the mirror's filename is refused, not replaced) and the
+    # frozen ``model``. It is inside the lock for the same reason the default read
+    # is: an attribution made outside it would vouch for a file a dashboard edit could
+    # replace before the write.
     assert order == [
         "lock",
-        f"read:{AGENT_FILENAME}:{True}",
         f"read:{WORKER_AGENT_FILENAME}:{True}",
+        f"read:{AGENT_FILENAME}:{True}",
         f"write:{True}",
         "unlock",
     ], order
     assert order.count(f"read:{AGENT_FILENAME}:{True}") == 1, order
+    assert order.count(f"read:{WORKER_AGENT_FILENAME}:{True}") == 1, order
 
 
 def test_the_withheld_cron_grants_are_sel_audited(tmp_path, monkeypatch):

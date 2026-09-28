@@ -2017,8 +2017,17 @@ healthy and is not.
 
 The front forwards to the gateway's own `POST /v1/chat/completions` with
 `{model, messages, id, stream}`, returning one JSON completion or an SSE stream.
-`model` is set from the DEPLOYED crew name and never copied from the payload, and
+`model` is derived from the DEPLOYED crew and never copied from the payload, and
 `id` is the slot id, which is what continues a conversation.
+
+The value it carries is the crew's AGENT ID -- `crew-<crew_name>`, the name inside the
+crew namespace the supervisor installs the crew's spec under -- rather than the bare
+crew name. The bare name resolves to whatever else in the agents directory declares it,
+and for a crew sharing a name with one of Kiro Crew's own derived specs that is the
+derived spec. The namespace does not leave this process in either direction: a customer
+addresses the crew by its own name, and the front puts that name back into the `model`
+of the completion it returns and of every projected chunk, so a client that reads the
+field and sends it again addresses the same crew.
 
 Facts the front must respect, each established by reading the gateway's source and
 each wrong once in a way that produced no error:
@@ -2088,6 +2097,33 @@ read the task role from its own environment and act as it. The model credential 
 removed on the same grounds, in both of its shapes: the identity reaches the engine
 from the crew's vault through the host auth callback, so the worker needs none in its
 environment.
+
+**The crew's spec is installed inside a namespace the derivation cannot own.** It lands
+at `<kiro agents>/crew-<crew_name>.json` and DECLARES `crew-<crew_name>`; `mcp.json` and
+`skills/` go to the data home unchanged. Kiro Crew derives specs of its own into the same
+agents directory -- `kirocrew.json`, `kirocrew-lite.json`, and the `kirocrew-worker.json`
+mirror it rebuilds from the default -- and rewrites them without reading who wrote what,
+so a crew occupying one of those names is installed, digest-checked and then replaced
+before the first turn. A crew called `kirocrew-worker` is not hypothetical: it is the
+crew the first deployment ships.
+
+The namespace covers the declared name as well as the filename because only one of them
+dispatches: kiro-cli and the gateway's snapshot of dispatchable agents both enumerate
+agents by the spec's declared `name`, so a file renamed without its name is reachable
+under no id at all -- the bare name is then declared twice and refused as ambiguous,
+while the namespaced one is declared by nothing and falls back to the default agent. The
+declared name is therefore the one field the install rewrites; every other key is the
+bundle's own, and the digest still covers the bundle's bytes in the image layer. A crew
+name whose namespaced id cannot fit the gateway's 64-character agent-name grammar is
+refused at boot rather than answering 400 per turn. `crew-` is free of every name Kiro
+Crew manages, and because the container imports no `kiro_crew` that claim is pinned by a
+test that imports both rather than by a comment.
+
+The derivation holds the other end: it refuses to overwrite a `kirocrew-worker.json` that
+does not carry the marks every derived mirror carries -- its declared name and a
+reference to the `kirocrew-work` server -- on the boot path and on the spawn path alike.
+Provenance, not existence, which is what covers a spec placed by hand or by an older
+exporter, neither of which the namespace reaches.
 
 **A reinstall replaces the bundle's own files and prunes nothing else.**
 `install_bundle` runs at every boot and the data home may be a persistent volume, so

@@ -9352,6 +9352,94 @@ something some work item needs.
 """
 
 
+def _foreign_worker_spec_reason(spec: dict[str, Any] | None) -> str | None:
+    """Why *spec*, read from the mirror path, is not this derivation's own, or ``None``.
+
+    Takes the PARSE rather than the path, so a caller that must also use those bytes
+    does not read the file twice: two reads are two observations, and the second could
+    describe a different generation than the one that was attributed.
+
+    PROVENANCE, not existence, and the distinction is the whole point. Existence is
+    what the freshness check reasons about, and a file at this path that the
+    derivation did not write is not stale against the default: replacing it destroys
+    whatever put it there.
+
+    ``None`` -- meaning "ours to write" -- covers three states, and the third is
+    deliberate:
+
+    * the file is ABSENT, so there is nothing to attribute;
+    * it carries both marks every derivation writes (see below);
+    * it does not parse as an agent spec object at all. A broken file at this path
+      is not somebody's work to protect, and refusing to replace it would leave the
+      worker permanently undispatchable on a host with one truncated write behind it.
+      A bundle's spec is digest-verified before install and therefore parses, so this
+      does not reach the case the refusal exists for.
+
+    The two marks are the declared ``name`` and a reference to the ``kirocrew-work``
+    server -- the mount that IS this agent, and the reason it exists at all. Both have
+    been written by every release that produced a mirror, which is what keeps an
+    upgrade from turning into a refusal: ``test_worker_agent.py`` pins that a mirror
+    left by an older build is HEALED rather than needing a hand-edit, and a mark chosen
+    from the current spec's shape (the exact prompt, the mounted server map) would
+    refuse those files instead of repairing them. So the reference is accepted wherever
+    a release put it -- the server map, ``tools``, or a per-tool grant.
+
+    Neither mark is a secret and a spec could forge them; forging them volunteers the
+    forger's own file to be replaced, which costs nothing. What cannot happen is the
+    reverse: an ordinary shared crew -- its own prompt, its own servers, its own name
+    -- being read as a mirror.
+    """
+    if not isinstance(spec, dict):
+        return None
+    declared = spec.get("name")
+    if declared != Path(_WORKER_AGENT_FILENAME).stem:
+        return f"it declares the agent name {declared!r}"
+    servers = spec.get("mcpServers")
+    mounts_work = isinstance(servers, dict) and "kirocrew-work" in servers
+    # Each container is shape-checked before it is iterated, not only its elements: a
+    # hand-edited spec holding ``"tools": 1`` would otherwise raise ``TypeError`` out of
+    # an attribution, which is not a ``DerivedSpecStale`` and so reaches the spawn
+    # callers as an unhandled error instead of a declined dispatch. The same discipline
+    # ``_WORKER_MIRRORED_SHAPES`` applies to the default spec's keys. A value of the
+    # wrong type carries no reference, so it contributes nothing rather than refusing on
+    # its own -- the verdict stays about the marks, not about the file's tidiness.
+    refs_work = any(
+        ref == "@kirocrew-work" or ref.startswith("@kirocrew-work/")
+        for key in ("tools", "allowedTools")
+        for ref in (spec[key] if isinstance(spec.get(key), list) else ())
+        if isinstance(ref, str)
+    )
+    if not mounts_work and not refs_work:
+        return "it does not reference the kirocrew-work server that defines this agent"
+    return None
+
+
+def _refuse_foreign_worker_spec(path: Path, spec: dict[str, Any] | None) -> None:
+    """Raise :class:`ForeignAgentSpec` when *spec*, read from *path*, is not ours.
+
+    *path* is carried for the message and the log only; the verdict is about the bytes
+    the caller already read.
+    """
+    reason = _foreign_worker_spec_reason(spec)
+    if reason is None:
+        return
+    # ERROR, not debug: the boot installer's own caller swallows the exception at debug
+    # level, so without this line the one event an operator needs -- "your shared crew
+    # is occupying the mirror's filename" -- would be invisible at any ordinary level.
+    logger.error(
+        "Refusing to overwrite %s: %s, so it was not written by this derivation. A crew "
+        "installed under this filename is served from %s instead; a hand-placed spec "
+        "must be moved or renamed before the worker can be derived again.",
+        path,
+        reason,
+        path.parent / f"crew-{path.stem}.json",
+    )
+    raise ForeignAgentSpec(
+        f"{path} holds a spec this derivation did not write ({reason}); refusing to "
+        f"overwrite it with the derived {_WORKER_AGENT_FILENAME} mirror"
+    )
+
+
 def _install_worker_agent() -> None:
     """Generate and install the kirocrew-worker agent config.
 
@@ -9447,7 +9535,19 @@ def _write_worker_spec(config: dict, path: Path, *, template_grants: list[str]) 
     statement rather than a long indented block -- the transform is pure dict work on
     small maps, so holding both locks across it costs nothing and is what makes the
     mirror a SNAPSHOT rather than a read that may already be stale by the write.
+
+    Raises :class:`ForeignAgentSpec` when *path* already holds a spec this derivation
+    did not write, INSIDE the critical section: the attribution and the write it
+    guards have to be one locked step, or a spec landing between them is refused on
+    the previous file's provenance and overwritten anyway.
     """
+    # ONE read of the existing mirror, serving both things this function needs from it:
+    # whether the file is ours to replace at all, and the frozen ``model`` further down.
+    # Reading it twice would be two observations of a file this critical section is about
+    # to overwrite, and the attribution would then vouch for bytes other than the ones
+    # the model pin came from.
+    existing = _read_spec_capped(path)
+    _refuse_foreign_worker_spec(path, existing)
     # Stat BEFORE the read, so the bookkeeping below can prove the file did not move
     # while this derivation mirrored it.
     default_identity_before = default_spec_identity()
@@ -9555,7 +9655,6 @@ def _write_worker_spec(config: dict, path: Path, *, template_grants: list[str]) 
     # which nothing reads there. The shared writer version-gates it.
     _write_derived_permissions(config, config["allowedTools"], _WORKER_AGENT_FILENAME)
 
-    existing = _read_spec_capped(path)
     if isinstance(existing, dict) and "model" in existing and _worker_model_is_user_pinned():
         # An explicit per-agent pick outranks the mirror, and it has to be read back
         # off the file: the template the mirror falls back to carries the shipped
@@ -9664,6 +9763,31 @@ class DerivedSpecStale(RuntimeError):
     whose mirror predates a trust revocation still has the revoked server mounted
     and auto-approved, so starting it runs ungoverned grants; a refused dispatch is
     recoverable and reportable, which is the whole point of the work ledger.
+    """
+
+
+class ForeignAgentSpec(DerivedSpecStale):
+    """A spec at a path this derivation owns was written by somebody else.
+
+    The mirror path ``kirocrew-worker.json`` is a NAME, and a name can be claimed. A
+    crew shared through the Fargate runtime installs its own spec into the same
+    directory, so a file sitting at that path is not necessarily a mirror. A
+    re-derivation that read one anyway would judge it a stale mirror of the default
+    and replace the shared crew's prompt and tool surface with Kiro Crew's own, with
+    no error and nothing in the logs naming the crew.
+
+    A :class:`DerivedSpecStale` rather than a sibling of it, and the subclassing is
+    load-bearing rather than tidy: every spawn-path caller catches that class BY NAME
+    (``acp/client.py``, ``acp/runtime.py``, ``acp/harness/kas.py``) and turns it into a
+    refused dispatch, so a separate exception type would reach them as an unhandled
+    error and end the session instead of declining the spawn. What the subclass adds is
+    a message and a log line naming the real fault; what it inherits is every caller's
+    existing decision about a spec that cannot be vouched for.
+
+    Both raise sites sit under callers that report rather than crash. The boot
+    installer's failure costs the mirror, and the spawn gate then refuses the dispatch
+    loudly rather than running an unverified spec; the spawn path's own re-derive
+    returns ``False``.
     """
 
 
@@ -9996,6 +10120,16 @@ def _require_fresh_worker_spec(work_dir: str | Path | None) -> None:
             f"{_WORKER_AGENT_FILENAME} mirror cannot be verified or rebuilt; refusing "
             "to start the worker on a mirror of unknown generation"
         )
+    # Attributed BEFORE freshness is judged, because "stale" is a statement about a
+    # mirror and this file may not be one. A spec somebody else wrote is not stale
+    # against the default and cannot be repaired by re-deriving over it, so asking the
+    # freshness question first would make overwriting it look correct. The refusal is
+    # raised here rather than left to the re-derive below so the message names the file
+    # and the crew namespace: ``rederive_worker_agent`` never raises, so a refusal
+    # reaching the spawn through it would arrive as "could not be re-derived", which
+    # sends an operator looking for the wrong fault.
+    mirror_path = agents_dir / _WORKER_AGENT_FILENAME
+    _refuse_foreign_worker_spec(mirror_path, _read_spec_capped(mirror_path))
     if not _derived_spec_matches_default(agent):
         logger.info("Worker spec predates the default agent spec; re-deriving before spawn")
         if not rederive_worker_agent("a stale mirror observed on the spawn path"):

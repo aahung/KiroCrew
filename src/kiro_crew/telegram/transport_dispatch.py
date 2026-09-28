@@ -29,11 +29,12 @@ import logging
 import os
 import re
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+from kiro_crew import runtime_death
 from kiro_crew.acp.client import AcpError
 from kiro_crew.agent_discovery import list_agents
 from kiro_crew.config import live
@@ -66,6 +67,7 @@ from kiro_crew.messaging.dispatch import (
     admit_inbound_callback,
     build_auto_approve,
     build_directive_consumer,
+    charge_turn_failure,
     consume_reinjection,
     delivery_is_muted,
     driver_turn_landed,
@@ -928,17 +930,22 @@ class TelegramDispatcher:
                 return
             rest = parse_command_argument(text)
             if not rest:
-                applied = await privacy_mode.apply_mode(
-                    cmd,
-                    # Rotation FIRST: a bare modifier returns before the turn path
-                    # would have rotated, so keying on the un-rotated generation
-                    # protects a session the next message abandons.
-                    resumed_key or self._rotated_session_key(route),
-                    source="telegram",
-                    caller=str(user_id),
-                    sessions=self.sessions,
-                    notify=lambda note: self._notify(chat_id, note, thread=reply_thread),
-                )
+                try:
+                    applied = await privacy_mode.apply_mode(
+                        cmd,
+                        # Rotation FIRST: a bare modifier returns before the turn path
+                        # would have rotated, so keying on the un-rotated generation
+                        # protects a session the next message abandons.
+                        resumed_key or self._rotated_session_key(route),
+                        source="telegram",
+                        caller=str(user_id),
+                        sessions=self.sessions,
+                        notify=lambda note: self._notify(chat_id, note, thread=reply_thread),
+                    )
+                except privacy_mode.PrivacyModeRefused:
+                    # Audited and announced by apply_mode: the conversation was not
+                    # made private and nothing runs.
+                    return
                 if not applied:
                     # Idempotent, so apply_mode said nothing. Say something anyway:
                     # silence reads as the command having failed.
@@ -1078,14 +1085,20 @@ class TelegramDispatcher:
             return
         privacy_mode.hydrate(self.sessions, session_key)
         if privacy_request:
-            await privacy_mode.apply_mode(
-                privacy_request,
-                session_key,
-                source="telegram",
-                caller=str(user_id),
-                sessions=self.sessions,
-                notify=lambda note: self._notify(chat_id, note, thread=reply_thread),
-            )
+            try:
+                await privacy_mode.apply_mode(
+                    privacy_request,
+                    session_key,
+                    source="telegram",
+                    caller=str(user_id),
+                    sessions=self.sessions,
+                    notify=lambda note: self._notify(chat_id, note, thread=reply_thread),
+                )
+            except privacy_mode.PrivacyModeRefused:
+                # Audited and announced by apply_mode. The message is NOT run:
+                # running it with the mode dropped is the leak the modifier
+                # exists to prevent.
+                return
         channel_id = f"telegram:{user_id}"
         agent = self._resolve_agent(route)
         if resumed_key is not None:
@@ -1138,6 +1151,13 @@ class TelegramDispatcher:
         # on _acquired so we never release a semaphore we didn't hold. Mirrors
         # slack/transport_dispatch.py.
         _acquired = False
+        # The provider THIS turn acquired, for the failure handler's attribution
+        # question. Bound before the try so every handler can read it -- an
+        # attribution flag read on a path its assignment cannot reach is an
+        # UnboundLocalError inside an except arm, not a guard. Stays None when
+        # get_or_create never returned, and an unattributable death charges as
+        # before.
+        _turn_provider: object | None = None
         failure_reason: str | None = None
         attachment_temp_paths: list[str] = []
         # Post-compaction re-injection bookkeeping for the finally: whether this
@@ -1169,6 +1189,12 @@ class TelegramDispatcher:
                 model=(None if resumed_key is not None else self._model_pref.get(route) or None),
             )
             _acquired = True
+            # Hold the provider this turn obtained, for the failure handler's
+            # attribution question. Captured HERE rather than looked up when a
+            # failure is handled: the recovery paths replace a dead session, so a
+            # lookup at failure time answers for the replacement and the question
+            # silently becomes "was the NEW runtime shared".
+            _turn_provider = provider
             if resumed_key is None or channel_namespace_of(session_key):
                 # The session's crew log, opened the moment the allocation lands
                 # and before ANY further await: the work ledger appends every write
@@ -1332,6 +1358,11 @@ class TelegramDispatcher:
             # ── Post-turn bookkeeping (each guarded so a failure here can't
             # fall through to the except and re-record the successful turn). ──
             self.sessions.record_success(session_key)
+            # Beside the counter it stands in for: a landed turn clears the
+            # shared-death streak exactly as it clears the consecutive-failure
+            # count, so the streak stays a consecutive run rather than a lifetime
+            # total whose bound is permanently tripped.
+            runtime_death.clear_shared_deaths(session_key)
             # The prompt (with any re-injected context) reached the model and
             # the turn completed, so the finally must NOT restore the flag --
             # unless the user cancelled it, which discards that prompt.
@@ -1557,7 +1588,18 @@ class TelegramDispatcher:
             # generic retry text; everything else stays generic (None).
             failure_reason = _user_safe_failure_reason(exc)
             if _acquired:
-                await self.sessions.record_failure(session_key)
+                # A dying runtime reaches this generic handler as one more
+                # exception, so without the attribution question every tenant of
+                # one process charges its own breaker for a single process event.
+                # ``_turn_provider`` is the one THIS turn acquired, never a lookup
+                # made while handling the failure.
+                await charge_turn_failure(
+                    self.sessions,
+                    session_key,
+                    exc=exc,
+                    provider=_turn_provider,
+                    channel_type="telegram",
+                )
                 Stats().inc_message_failed()
         finally:
             # An approval window the driver never awaited -- the prompt went out
@@ -1648,12 +1690,14 @@ class TelegramDispatcher:
         *privacy_request* is a modifier the caller stripped off *text*, and the two
         branches owe it different things because they run the request under different
         keys. A STEERED message folds into the turn already running on
-        ``session_key``, so the mark belongs on that key now, before the steer, or
-        the running turn's transcript is written before anything marks it. A QUEUED
-        message runs later under whatever key the drained turn resolves, so the
-        request rides ALONG with it and is applied there. Applying it here for a
-        queued message would mark a key the drain may have rotated past, which is the
-        failure the deferred apply exists to avoid.
+        ``session_key``, so the mode is RESERVED on that key before the steer -- row
+        on disk, mark and header (``privacy_mode.reserve``) -- or the running turn's
+        transcript would be written before anything marks it; a refusal means no
+        steer. A landed steer commits the reservation; a steer that did not land
+        releases it (the message then takes the queue path, where the request is
+        applied under the drained key), so a turn the user never asked to protect is
+        not left restricted. A QUEUED message runs later under whatever key the
+        drained turn resolves, so the request rides ALONG with it and is applied there.
         """
         assert self.client is not None
         chat_id = int(msg.conversation_id)
@@ -1680,26 +1724,72 @@ class TelegramDispatcher:
             # message is re-run or queued instead of lost.
             has_active = getattr(provider, "has_active_turn", None)
             live = has_active is None or bool(has_active())
-            steered = bool(
-                live
-                and getattr(provider, "supports_steer", False)
-                and steer is not None
-                and await steer(text)
+            can_steer = (
+                live and bool(getattr(provider, "supports_steer", False)) and steer is not None
             )
-            if steered:
-                if privacy_request:
-                    # The turn this folded into is running on THIS key, and it writes
-                    # its transcript when it finishes. Marked after the steer landed,
-                    # so a refused steer does not leave the session restricted for a
-                    # message that fell through to the queue path instead.
-                    await privacy_mode.apply_mode(
+            reservation: privacy_mode.Reservation | None = None
+            # ONE producer for everything this path tells the user about the
+            # mode: the refusal (at once), the confirmation (by commit, only once
+            # the steer has put the message in the turn) or the failure notice.
+            announce = lambda note: self._notify(chat_id, note, thread=thread)  # noqa: E731
+            if privacy_request and can_steer:
+                # RESERVE before the steer. A steer cannot be taken back once it
+                # lands, and the turn it folds into runs on THIS key and writes
+                # its transcript when it finishes -- so the row, the mark and the
+                # header must exist before the message is in that turn, not after
+                # (a persist that failed after the steer would leave the turn run
+                # with no durable record; two modifiers racing for the last row
+                # would both steer). reserve publishes only once the row is on
+                # disk -- a row that cannot be taken or written is a refusal,
+                # already audited and announced: no steer, nothing runs -- and
+                # hands back what a failed steer must release. It does NOT confirm
+                # the mode: the steer may still decline or fail, and a "mode ON"
+                # for a message that then ran elsewhere or not at all is false.
+                try:
+                    reservation = await privacy_mode.reserve(
                         privacy_request,
                         session_key,
                         source="telegram",
                         caller=caller,
                         sessions=self.sessions,
-                        notify=lambda note: self._notify(chat_id, note, thread=thread),
+                        notify=announce,
                     )
+                except privacy_mode.PrivacyModeRefused:
+                    return
+            try:
+                steered = bool(can_steer and steer is not None and await steer(text))
+            except asyncio.CancelledError:
+                # Cancelled mid-steer: the outcome is unknown -- the steer's
+                # bytes may already be with the backend -- so the mode STANDS
+                # (fail-closed: taking it back would strip the protection from
+                # a message that may be recorded). Committed silently; the
+                # cancellation goes through.
+                if reservation is not None:
+                    with suppress(Exception):
+                        await privacy_mode.commit(reservation, unconfirmed=True)
+                raise
+            except BaseException:
+                # The steer RAISED after the message may have reached the
+                # backend (the write lands before the awaited flush that
+                # fails), so nobody knows whether it is in the turn. Keep the
+                # mode -- row, mark and header exactly as a landed steer leaves
+                # them -- and tell the user the mode is on but the message
+                # itself is unconfirmed; then let the failure propagate as
+                # before. Only an explicit decline (``steer`` returning False)
+                # releases: that message provably runs elsewhere. The notice
+                # is best-effort, as in the arm above: ``commit`` records the
+                # mode BEFORE it sends, so a sender that raises has changed
+                # nothing else, and letting it through here would replace the
+                # steer's own exception with the notice's.
+                if reservation is not None:
+                    with suppress(Exception):
+                        await privacy_mode.commit(reservation, unconfirmed=True)
+                raise
+            if steered:
+                if reservation is not None:
+                    # The message is in the turn: the mode is the conversation's
+                    # for good, and THIS is when the user is told so.
+                    await privacy_mode.commit(reservation)
                 # Record the user's OWN words on the running turn's renderer so
                 # it can render an inline "↪️ steered: <text>" chip (never the
                 # redacted backend echo). Best-effort: no active renderer -> skip.
@@ -1719,6 +1809,17 @@ class TelegramDispatcher:
                     except Exception:
                         logger.debug("telegram: steer ack reaction failed", exc_info=True)
                 return
+            if reservation is not None:
+                # The steer did not land (the provider declined it): the message
+                # falls through to the queue path below and runs at the drain,
+                # where ``privacy_request`` is applied under the drained key. The
+                # reservation is RELEASED -- marking this key for a message that
+                # never ran here would restrict a turn the user never asked to
+                # protect -- unless another modifier on this thread is riding it
+                # or has landed, which release checks before loosening anything.
+                await privacy_mode.release(
+                    reservation, sessions=self.sessions, source="telegram", caller=caller
+                )
         # queue mode (or /queue override, or steer unavailable). Enqueue + receipt
         # happen atomically under ``self._queue.lock`` (see ``_enqueue_with_receipt``)
         # so the end-of-turn drain -- which takes the same lock to dequeue + flip
@@ -2060,10 +2161,10 @@ class TelegramDispatcher:
         can list several principals': a GROUP chat gives every member one chat address
         and one session key, so a drain answering one member must leave the others'
         lines -- and the entry that is their only handle -- alone. REQUIRED and
-        keyword-only, unlike the registry transition it forwards to, which keeps a
-        default for a caller that genuinely cannot name a principal: this wrapper has
-        exactly one caller and that caller always can, so an omission is a type error
-        rather than a silent return to retiring the whole bubble.
+        keyword-only, the same way the registry transition it forwards to spells it:
+        this wrapper has exactly one caller and that caller always can name the
+        principal, so an omission is a type error rather than a silent return to
+        retiring the whole bubble.
 
         ``chat_id`` is the chat the receipt BUBBLE lives in, which the drain takes
         from the queued entry's own origin rather than from the turn that opened the
@@ -2074,7 +2175,7 @@ class TelegramDispatcher:
         """
         assert self.client is not None
         await self._queue.flip_answering_locked(
-            session_key, self._receipt_surface(chat_id, None), answered, deferred, owner
+            session_key, self._receipt_surface(chat_id, None), answered, deferred, owner=owner
         )
 
     async def _handle_dashboard(

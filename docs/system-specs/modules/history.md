@@ -180,7 +180,7 @@ Per-thread JSONL files at `~/.kiro/crew/sessions/{safe_key}.jsonl`. First line i
   which is why the save path does not do it.
 - **Cache-fill staleness guard** — transcript memos use a cache identity of `(st_mtime_ns, st_ctime_ns, st_ino)`, rather than mtime alone. That makes the normal atomic rewrite visible even when housekeeping restores its pre-write mtime via `_restore_mtime`; the replacement inode or changed ctime forces a miss. A per-key invalidation **generation** still closes in-process fill races: `_invalidate_cache` bumps it BEFORE dropping entries, and each fill snapshots it before `stat` then re-checks it around publish via `_publish_if_current`, discarding a fill if it moved. `_meta_cache`, `_recent_cache`, `_folded_cache`, `_snippet_cache`, and `_msg_cache` record both identity and generation; `_folded_cache`/`_snippet_cache` serialize stat → read → store under `_file_lock`, while `_msg_cache`'s unlocked on-loop fallback additionally needs a cross-process flock-hold witness. The generation table is process-wide (class-level, keyed by transcript directory + sanitized stem), and invalidation covers each spelling of one session — logical key, sanitized `path.stem`, and canonical/legacy Slack aliases in both directions (`_cache_key_identities`).
 - `recent(key)` — last 20 messages for context injection
-- `recent_with_provenance(key)` — entries with source citations
+- `recent_with_provenance(key)` — entries with source citations. Never a display-only row (`DISPLAY_ONLY_ROLES`, the `notice` role): notices are drawn for the reader, not conversation, and the consolidator's memory and skill-detection prompts skip them the same way while its offset still passes them (the Slack thread-parent row reaches a model only through its fenced block)
 - `list_sessions()` — lists all sessions with title (first user message or LLM-generated). Sort key uses ISO `created` string consistently (defaults to ISO from `st_mtime` if no metadata `created` field, ensuring string-only comparisons). Each returned session's meta dict also carries `folder_id` when present in the persisted metadata line, so sessions can be grouped by the folder they were filed in.
 - `agent_usage()` — returns `{agent_name: (session_count, last_used_mtime)}`; built on `list_sessions()` so it inherits canonical-session dedup + symlink-skip (counts per logical conversation). Used by `GET /api/agents` to order the roster most-used-first, degrading to config order on failure.
 - `history_index.py` stores file freshness identities without truncation: signed-64-bit
@@ -220,6 +220,12 @@ workspace-scoped by default (fail-closed via `_caller_workspace`/`_ws_bucket`,
   one-line LLM summary per session — MCP core has no LLM access, so the LLM leg
   runs gateway-side on an ephemeral background session (cheap Haiku model),
   bounded to 8 sessions and best-effort (falls back to the title on any failure).
+  The reply is shape-checked before anything is stored: the taught `SKIP`
+  verdict, alone or with a reason, and a refusal (`label_guard.looks_like_prose`
+  with the summary's own ceilings, without the conversation-referring openers
+  and without the sentence-shape signals, since a summary is a sentence by
+  contract) both return `""` — never a cached value — so one model refusal is
+  not served on every later list until the transcript changes.
   A generated summary is cached in a **sidecar file** (`sessions/.summaries/`),
   never in the session JSONL, keyed by the session file mtime — so summarizing an
   active session never rewrites (and cannot clobber a concurrently-appended

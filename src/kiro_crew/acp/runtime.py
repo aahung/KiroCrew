@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -29,7 +30,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable, NamedTuple, TypeVar
 
-from kiro_crew import acp_tool_gate, agent_scratch, platform_compat
+from kiro_crew import acp_tool_gate, agent_scratch, platform_compat, runtime_death
 from kiro_crew.acp._dispatch import (
     agent_version_from_init,
     attach_kas_custom_agents,
@@ -58,6 +59,7 @@ from kiro_crew.acp.client import (
     finish_suspended_spawn,
     is_auth_failure_output,
     is_sandbox_init_failure_output,
+    registration_throttle_line,
     response_write_window_secs,
     write_notification_best_effort,
     write_response_frame_bounded,
@@ -148,7 +150,7 @@ from kiro_crew.metrics.events import (
 )
 from kiro_crew.providers.mirrors.registry import has_mirror, mirror_for
 from kiro_crew.resource_status import inject_xdist_auto_cap
-from kiro_crew.runtime_ownership import authorize_runtime_kill
+from kiro_crew.runtime_ownership import authorize_runtime_kill, outstanding_leases
 from kiro_crew.sandbox import (
     RLIMIT_PROFILE_SESSION_HOST,
     BoundWorkspaceMismatch,
@@ -171,12 +173,15 @@ from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.session_pid import (
     _pgroup_has_member_besides,
     _pid_gone_or_unmanaged,
+    _pid_start_token,
     _replace_child_pids,
     _signal_orphaned_runtime_group,
     _track_pid,
     _track_session_pid,
     _untrack_child_pids,
     _untrack_pid,
+    _untrack_pid_if_dead,
+    _untrack_root_by_identity,
     _untrack_session_pid,
     group_vouching_available,
     register_protected_pid,
@@ -293,6 +298,63 @@ _ENOSPC_HINT = (
     "the runtime tmp filesystem is out of space or inodes; run `kirocrew doctor` "
     "(Runtime tmpfs section)"
 )
+
+
+def _proven_death_cause(tail: str) -> tuple[str, str] | None:
+    """The line in *tail* that EXPLAINS a death and its operator hint, or None.
+
+    Returns ``(evidence, hint)`` -- the matched line, and any pointer that line
+    earns -- rather than one joined string, because the caller caps what it shows.
+    Joining first would let a long line push its own hint past the cap, which is
+    precisely backwards: the hint is the short part the operator needs and the
+    evidence is the long part that can afford to be trimmed. ``hint`` is empty
+    when the signature carries no pointer.
+
+    A child's last stderr line is not evidence of why it died, and reporting it
+    as the cause sends the reader after the wrong thing. Measured over one
+    gateway's fleet: every sampled runtime death carried ``rc=-15``, an ordinary
+    SIGTERM teardown, while the ``HTTP 404`` registration line that gets pasted
+    as the reason appears in 3 of 41 deaths and once on a runtime that does not
+    die at all. So the cause slot is reserved for a shape that
+    describes a death, and an unexplained one is reported as the exit status it
+    is, with the tail kept for whoever asks the log for it.
+
+    Both signatures are matched per LINE by their own helpers and searched over
+    the WHOLE retained tail rather than only its last line, because which line a
+    child printed last is a race with its own flushing and says nothing about
+    which line matters.
+    """
+    throttled = registration_throttle_line(tail)
+    if throttled:
+        return throttled, ""
+    for line in tail.splitlines():
+        if _ENOSPC_MARKER in line.lower():
+            return line.strip(), _ENOSPC_HINT
+    return None
+
+
+def _rc_phrase(rc: object) -> str:
+    """``rc=N``, and for a signal death the SIGNAL's name beside it.
+
+    A negative returncode is POSIX's ``-signum``, which is the whole exit status
+    of a killed child -- and the number alone is the part an operator has to look
+    up. Naming it is what makes the ordinary teardown legible as one:
+    ``rc=-15 (signal SIGTERM)`` reads as "something asked it to stop", where a
+    bare ``rc=-15`` beside a stray stderr line reads as a crash.
+
+    Anything that is not a negative int -- a real exit code, the ``?`` a
+    never-spawned process yields -- is rendered unchanged, so this only ever adds
+    a name it can prove.
+    """
+    if isinstance(rc, int) and not isinstance(rc, bool) and rc < 0:
+        try:
+            name = signal.Signals(-rc).name
+        except ValueError:
+            return f"rc={rc}"
+        return f"rc={rc} (signal {name})"
+    return f"rc={rc}"
+
+
 # JSON-RPC 2.0 "Method not found" — the reader loop answers an ownerless
 # server→client request with this itself (see _answer_ownerless_request);
 # mirrors the private constant AcpClient keeps for its own dispatch sites.
@@ -1709,6 +1771,10 @@ class AcpRuntime:
         # Process state
         self._process: asyncio.subprocess.Process | None = None
         self._pid: int | None = None
+        # The root's process-start identity, read once at spawn. It is what lets
+        # an OBSERVED death retire the registry lines that name this process and
+        # no other: the number alone can be recycled before the write lands.
+        self._spawn_start_token: str | None = None
         self._start_time: str | None = None
         self._spawn_monotonic: float | None = None
         # pid -> (start_id, basename): the record shape session_pid verifies a
@@ -2959,9 +3025,33 @@ class AcpRuntime:
         # LIVE runtime losing its shield and being SIGKILLed mid-use by the very
         # sweep this call exists to hide it from.
         register_protected_pid(self._pid)
+        # Read BEFORE the appends, so the identity held here is the one this
+        # process had when the gateway took it on. It is what lets an OBSERVED
+        # death retire the session line that names THIS process and no other --
+        # and it is handed to the tracker below, so the line written and the
+        # line later compared are ONE read of the identity, not two.
+        self._spawn_start_token = _pid_start_token(self._pid)
+        # Off the loop, as ``AcpClient._spawn`` does: each tracker takes an
+        # exclusive file lock and now, on a recycled number, rewrites the file
+        # under it -- blocking syscalls the heartbeat and every session would
+        # wait behind. ONE hop for the pair, and the pair's inputs are captured
+        # here so the worker never reads ``self`` after this method has moved on.
+        root_pid = self._pid
+        root_token = self._spawn_start_token
+
+        def _track_root_pids() -> None:
+            _track_pid(root_pid)
+            _track_session_pid(root_pid, root_token)
+
+        tracking = asyncio.get_running_loop().run_in_executor(
+            subprocess_executor(), _track_root_pids
+        )
         try:
-            _track_pid(self._pid)
-            _track_session_pid(self._pid)
+            # Shielded: a cancellation delivered here must not also cancel the
+            # worker's future -- the worker cannot be stopped once it has begun,
+            # and the ``except BaseException`` below relies on being able to
+            # WAIT for it.
+            await asyncio.shield(tracking)
         except Exception:
             # A runtime that is not in the PID files is unreachable by every
             # agent-runtime reaper: cleanup_orphaned_sessions,
@@ -2981,6 +3071,31 @@ class AcpRuntime:
                 self._pid,
                 exc_info=True,
             )
+        except BaseException:
+            # The hop is an AWAIT, so it is a cancellation point -- one that sits
+            # between this method's two ``except BaseException`` reap guards, so
+            # a ``CancelledError`` here would otherwise leave ``spawn()`` with no
+            # ``kill()``: a live child, already shielded from the sweep by
+            # ``register_protected_pid``, recorded in neither registry.
+            #
+            # Two things, in this order. FIRST wait for the worker: it may be
+            # inside ``_track_root_pids`` right now, and an append that lands
+            # AFTER the reap has untracked the pid resurrects a registry line
+            # for a dead, recyclable number -- the line a later sweep kills by.
+            # THEN reap. Both run as ONE task that this frame only WAITS on:
+            # a second ``cancel()`` (a newer slot signal, a slot deletion -- two
+            # ordinary dashboard paths cancel this same eager-spawn task) lands
+            # at the await below, not inside the cleanup, and is absorbed until
+            # the cleanup settles, so the reap cannot be skipped by being asked
+            # twice. The bound is the file-lock ceiling the worker itself lives
+            # under plus the kill path's own. The cancellation propagates after.
+            cleanup = asyncio.ensure_future(self._reap_after_cancelled_tracking(tracking))
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            raise
 
         # Everything after the subprocess exists must be guarded: if reader
         # startup or the initialize handshake fails (kiro-cli hang / auth stall),
@@ -3599,9 +3714,27 @@ class AcpRuntime:
                 # Untrack the PID so the orphan sweep doesn't chase a dead entry
                 # (mirrors AcpClient._reset_state). Best-effort — a leftover entry
                 # is only pruned lazily otherwise.
+                #
+                # By IDENTITY, the same way an observed death retires. The reap
+                # above proved THIS process dead, not that its number is still
+                # ours: the kernel can hand the number to a root this gateway
+                # spawns next before this line runs, and a prefix-matched untrack
+                # would then take the successor's lines with it. The recorded
+                # start token names the line that is ours; the bare line is
+                # removed only while the number is dead at that moment. A root
+                # whose identity could not be read at spawn has no token to
+                # compare, so it keeps the prefix-matched untrack it always had.
                 try:
-                    _untrack_pid(pid)
-                    _untrack_session_pid(pid)
+                    if self._spawn_start_token:
+                        if not _untrack_root_by_identity(pid, self._spawn_start_token):
+                            # No session line of ours to retire (spawn's append
+                            # failed, or a successor already replaced it): the
+                            # bare line still goes, but only while the number
+                            # is dead -- never by number alone.
+                            _untrack_pid_if_dead(pid)
+                    else:
+                        _untrack_pid(pid)
+                        _untrack_session_pid(pid)
                     unregister_protected_pid(pid)
                 except Exception:
                     logger.debug("AcpRuntime: PID untracking failed for %s", pid, exc_info=True)
@@ -4180,7 +4313,11 @@ class AcpRuntime:
                     try:
                         dropped = await _drain_oversize_line(stdout, exc)
                     except asyncio.IncompleteReadError:
+                        # The same observed EOF as the empty-line branch below,
+                        # reached with a torn frame in hand; the exit is confirmed
+                        # and retired the same way.
                         self._mark_dead("stdout closed mid-oversize-line")
+                        await self._retire_tracking_after_exit()
                         return
                     except OversizeLineUnrecoverable as fatal:
                         logger.error("stdout unrecoverable: %s", fatal)
@@ -4199,6 +4336,13 @@ class AcpRuntime:
                 if not line:
                     rc = self._process.returncode if self._process else "?"
                     self._mark_dead(self._exit_reason(rc))
+                    # The one death path that OBSERVES the exit rather than
+                    # causing it. ``kill()`` retires the registry entries after
+                    # its own reap; nothing else did, so an externally killed
+                    # root stayed in ``kiro_session_pids.txt`` until the
+                    # periodic sweep's next tick -- up to 300s of a dead pid a
+                    # reaper could resignal.
+                    await self._retire_tracking_after_exit()
                     return
 
                 self._last_activity = time.monotonic()
@@ -4742,37 +4886,56 @@ class AcpRuntime:
         return self._sandbox_hidden_dirs
 
     def _exit_reason(self, rc: object) -> str:
-        """The death reason for a process that exited: rc plus what it last said.
+        """The death reason for a process that exited: its exit status, and a CAUSE only if proven.
 
-        A bare ``rc=1`` told the operator nothing when every tool started
-        failing because the runtime tmpfs had run out of inodes. The last
-        non-empty stderr line the drain captured is appended (bounded by
-        ``_STDERR_REASON_TAIL_CHARS``), and an ENOSPC signature in it earns a
-        pointer at the doctor check that measures that filesystem. Best-effort:
-        the stderr drain is a separate task, so a line still in flight when
-        stdout closed is not seen here, and the reason then stays ``rc=N``.
+        A bare ``rc=1`` told the operator nothing when every tool started failing
+        because the runtime tmpfs had run out of inodes, so a cause belongs here
+        when there is one. What does NOT belong is the child's last stderr line
+        used AS the cause: it is whatever the child happened to flush last, which
+        on a measured fleet put ``HTTP 404 Not Found`` on the card for deaths
+        whose actual exit status was ``rc=-15`` -- a plain SIGTERM teardown. So
+        :func:`_proven_death_cause` decides, over the whole retained tail, and an
+        unexplained death reads as the signal or code it was.
+
+        The tail is not lost, it is demoted: the last line goes to the debug log,
+        redacted, for a reader who is already looking at this runtime. The card
+        and the death summary keep their own separate ``stderr_tail`` field, so
+        the evidence is still one hop away from anyone who needs it.
         """
-        reason = f"process exited (rc={rc})"
+        reason = f"process exited ({_rc_phrase(rc)})"
         if not self.recording_allowed:
             return reason
-        last = next((ln for ln in reversed(self._stderr_lines) if ln.strip()), "")
-        if not last:
+        tail = "\n".join(self._stderr_lines)
+        if not tail.strip():
             return reason
-        # The marker is matched on the whole line, so a signature past the cap
-        # still earns the hint; only what the card shows is cut.
-        enospc = _ENOSPC_MARKER in last.lower()
         # A child's stderr is untrusted text that can echo a token or an
         # authority-bearing URL (a failed login prints the header it sent), and
-        # the reason travels to the session card and the SEL, so it is redacted
-        # before the cut; the cut then cannot split a secret into a half the
-        # redactor cannot recognise.
-        last, _ = redact_credentials(last)
-        last, _ = redact_exfiltration_urls(last)
-        if len(last) > _STDERR_REASON_TAIL_CHARS:
-            last = last[:_STDERR_REASON_TAIL_CHARS] + "…"
-        reason = f"{reason}: {last}"
-        if enospc:
-            reason = f"{reason} — {_ENOSPC_HINT}"
+        # both sinks below are real -- the reason travels to the session card and
+        # the SEL, the debug line lands in the gateway log -- so redact before
+        # either, and before any cut, which then cannot split a secret into a
+        # half the redactor fails to recognise.
+        tail, _ = redact_credentials(tail)
+        tail, _ = redact_exfiltration_urls(tail)
+        last = next((ln for ln in reversed(tail.splitlines()) if ln.strip()), "")
+        if last:
+            logger.debug(
+                "AcpRuntime (PID %s) exit stderr tail: %s",
+                self._pid,
+                last[:_STDERR_REASON_TAIL_CHARS],
+            )
+        cause = _proven_death_cause(tail)
+        if cause is None:
+            return reason
+        evidence, hint = cause
+        # The signature was matched on the whole line, so a cause past the cap
+        # still earns its slot; only the EVIDENCE is cut. The hint is appended
+        # after the cut so a long line cannot push the operator's pointer out of
+        # the message it is the whole point of.
+        if len(evidence) > _STDERR_REASON_TAIL_CHARS:
+            evidence = evidence[:_STDERR_REASON_TAIL_CHARS] + "…"
+        reason = f"{reason}: {evidence}"
+        if hint:
+            reason = f"{reason} — {hint}"
         return reason
 
     # Rendered in place of a returncode that is not knowable YET. Both say
@@ -4821,6 +4984,18 @@ class AcpRuntime:
         so the gateway log holds the code too. Silent when the status is still
         unknown (both waits timed out): ``<not reaped>`` is then still true.
         """
+        self._note_reaped(rc, after_kill=True)
+
+    def _note_reaped(self, rc: object, *, after_kill: bool) -> None:
+        """Amend the death summary with *rc*; log it with the death's true origin.
+
+        ``after_kill`` selects the wording, nothing else. The observed-exit path
+        (the reader hitting EOF on a root that died from OUTSIDE -- an OOM kill,
+        an operator's ``pkill``) must not log "reaped after kill": ``kill()``'s
+        own contract is that a line saying "killed" names WHO killed, and a kill
+        Kiro Crew never issued has no such name. Attribution is the whole reason
+        the two paths log differently.
+        """
         if rc is None or self._death_summary is None:
             return
         if self._death_label != self._RC_NOT_REAPED:
@@ -4828,7 +5003,13 @@ class AcpRuntime:
         self._death_label = str(rc)
         self._compose_death_summary(self._death_reason, self._death_label, self._death_tail)
         log = logger.info if self._death_expected else logger.warning
-        log("AcpRuntime reaped after kill (PID %s): returncode=%s", self._pid, rc)
+        # Two LITERAL templates rather than one with the origin interpolated:
+        # the raw template is what log filters and the tests select on, and
+        # "reaped after kill" is the string they already match.
+        if after_kill:
+            log("AcpRuntime reaped after kill (PID %s): returncode=%s", self._pid, rc)
+        else:
+            log("AcpRuntime reaped after an observed exit (PID %s): returncode=%s", self._pid, rc)
 
     def _mark_dead(self, reason: str, *, expected: bool = False) -> None:
         """Mark runtime dead, fail all pending requests, poison all session queues.
@@ -4843,6 +5024,13 @@ class AcpRuntime:
         """
         if self._dead:
             return
+        # Read co-tenancy BEFORE the flag flips. Both readings go through
+        # liveness -- ``outstanding_leases`` excludes a dead runtime's leases by
+        # design, and ``is_alive()`` consults ``_dead`` -- so a count taken after
+        # the assignment below is zero for every death, which would report every
+        # shared process as single-tenant and defeat the attribution entirely.
+        _leases_at_death = outstanding_leases(self)
+        _acp_sessions_at_death = len(self._session_queues)
         self._dead = True
         # A process that already exited on its own is a genuine death being
         # reaped, not a teardown this caller initiated — refuse the downgrade
@@ -4887,6 +5075,18 @@ class AcpRuntime:
         # then attach WHO/WHY to their own error instead of raising bare.
         self._death_label = rc
         self._compose_death_summary(reason, rc, tail)
+        # Classify the death ONCE, here, where it is detected -- and before the
+        # pending futures are failed and the queues poisoned just below, so a
+        # tenant woken by its poison sentinel can already read why. Every tenant
+        # then reads this one record instead of forming its own account of a
+        # process event it only saw one session's corner of.
+        runtime_death.announce(
+            self,
+            reason=reason,
+            expected=expected,
+            leases=_leases_at_death,
+            acp_sessions=_acp_sessions_at_death,
+        )
         log = logger.info if expected else logger.warning
         log(
             "AcpRuntime dead (PID %s): %s [returncode=%s] stderr_tail: %s",
@@ -4913,6 +5113,110 @@ class AcpRuntime:
                 queue.put_nowait(None)  # poison sentinel
             except asyncio.QueueFull:
                 pass
+
+    async def _reap_after_cancelled_tracking(self, tracking: asyncio.Future[None]) -> None:
+        """Let the tracking worker finish, then reap the child. Never raises.
+
+        Run as its own task by the spawn cancellation guard, which shields it,
+        so a cancellation aimed at the spawn cannot interrupt either step.
+        ``asyncio.wait`` neither cancels *tracking* nor raises its exception; its
+        outcome does not matter here, only that it is over before the untrack
+        the reap performs.
+        """
+        await asyncio.wait({tracking})
+        try:
+            await self.kill(reason="reap after cancelled spawn tracking")
+        except Exception:
+            logger.debug(
+                "AcpRuntime: kill after cancelled PID tracking failed for %s",
+                self._pid,
+                exc_info=True,
+            )
+
+    async def _retire_tracking_after_exit(self) -> None:
+        """Drop this root's registry entries once its exit is CONFIRMED, not inferred.
+
+        Called from the reader loop's EOF branch, which is the only death path that
+        observes an exit instead of causing one. ``_kill_inner`` untracks after it
+        reaps; a root killed from outside (an OOM kill, a ``pkill``, an operator)
+        reached no such step, so its ``kiro_session_pids.txt`` / ``kiro_pids.txt``
+        lines survived until the periodic sweep's next tick, bounded only by
+        ``SessionCleanup.MAX_TICK_INTERVAL_SECS`` (300s). A registry line naming a
+        dead pid is the hazard the start token exists to blunt, not one to leave
+        standing for five minutes when the process that owns the line has already
+        watched it die.
+
+        A closed stdout is NOT an exit: a backend can close its pipe and keep
+        running, and untracking a live process would hide it from every reaper
+        for the host's uptime. So the exit is waited for, bounded by the same
+        window the kill path gives a SIGKILLed child to be reaped, and the pid is
+        re-probed after the wait. Any doubt -- the wait timed out, the pid still
+        answers, the probe raised -- RETAINS the entries, which is the direction
+        every reaper in ``session_pid`` already fails toward.
+
+        The write itself is bound to the process, not the number: once the root
+        is gone its number is free, and a replacement root this gateway spawns
+        can be handed it before the write lands, so a prefix-matched untrack
+        could erase the successor's only durable record. ``_untrack_root_by_identity``
+        removes the session line only when its recorded start token is the one
+        read at THIS spawn, and the bare root line only when the number is dead
+        at the moment of a probe taken under the bare file's own lock -- a live
+        holder of the number keeps its line. The root's own lines only: a
+        descendant that outlived the root is reparented and still running, and
+        its own ``kiro_pids.txt`` line is what the sweep reaps it by.
+
+        Offloaded to a thread because the untrack takes the file locks the sweep
+        contends for, and this runs on the event loop.
+        """
+        process = self._process
+        if process is None:
+            return
+        pid = process.pid
+        try:
+            if process.returncode is None:
+                await asyncio.wait_for(process.wait(), timeout=self._KILL_REAP_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.debug(
+                "AcpRuntime: stdout closed but PID %s has not exited within %.1fs; "
+                "leaving it tracked for the sweep",
+                pid,
+                self._KILL_REAP_TIMEOUT,
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug(
+                "AcpRuntime: could not confirm the exit of PID %s; leaving it tracked",
+                pid,
+                exc_info=True,
+            )
+            return
+        # The wait just measured the status ``_mark_dead`` could not know (it ran
+        # on EOF, before the reap): amend the retained summary the same way the
+        # kill path does, so the ``AcpProcessDied`` a turn or a cron records
+        # carries the real code instead of ``<not reaped>``. Worded as an
+        # OBSERVED exit: nothing here issued a kill, and a log line that says
+        # "killed" without naming who killed would defeat the attribution the
+        # kill path's own docstring requires.
+        self._note_reaped(process.returncode, after_kill=False)
+        if platform_compat.pid_exists(pid):
+            return
+        try:
+            retired = await asyncio.to_thread(
+                _untrack_root_by_identity, pid, self._spawn_start_token
+            )
+        except Exception:
+            logger.debug("AcpRuntime: PID untracking after exit failed for %s", pid, exc_info=True)
+            return
+        if not retired:
+            logger.debug(
+                "AcpRuntime: registry lines for PID %s were not provably this runtime's; "
+                "leaving them for the sweep",
+                pid,
+            )
+            return
+        logger.info("AcpRuntime: retired registry tracking for PID %d after it exited", pid)
 
     # ── Protocol Interface (used by AcpSessionHandle) ──
 
@@ -6379,7 +6683,9 @@ class AcpRuntime:
         # global/workspace entry and 2.20.0 reports as the client's own (see
         # ``hoist_managed_servers``). The kiro path returns None here and is
         # untouched.
-        kas_agents, mcp_servers = hoist_managed_servers(kas_agents, active_agent, mcp_servers)
+        kas_agents, mcp_servers = hoist_managed_servers(
+            kas_agents, active_agent, mcp_servers, session_token=stub_token
+        )
         # The host's last word on its own tool surface. A host that reads an
         # agent spec passes the list straight back; one that has nothing else
         # describing its tools narrows it to the transports it advertised at
@@ -7259,7 +7565,9 @@ class AcpRuntime:
             # Same carriage as create_session: a resumed session re-initializes
             # its servers, and the managed ones must win the same-name contest
             # on load exactly as they did on new.
-            kas_agents, mcp_servers = hoist_managed_servers(kas_agents, active_agent, mcp_servers)
+            kas_agents, mcp_servers = hoist_managed_servers(
+                kas_agents, active_agent, mcp_servers, session_token=stub_token
+            )
             # REBIND, not just re-assign the param: the hoist changes the array, and
             # wire_servers is what the stall diagnostic and the session report read.
             # Setting only load_params would leave both describing the pre-hoist roster

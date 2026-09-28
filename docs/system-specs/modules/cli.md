@@ -212,7 +212,7 @@ choice blob makes the usage line unreadable.
 | `kirocrew gateway` | Start the Kiro Crew server (dashboard + messaging channels) |
 | `kirocrew gateway --slack-only` | Start without dashboard or SSH tunnel instructions |
 | `kirocrew gateway --no-crons` | Start without cron scheduler (use when another instance handles crons) |
-| `kirocrew gateway --no-tunnel` | Never publish a tunnel: refuses to start or provision one for the life of the process, whatever `tunnel.enabled` says. SCOPED TO TUNNELS — it does not change where the dashboard binds, so a config that widens `dashboard.url` off loopback still does, with token auth as the control there; do not read `publish_disabled()` as "no published surface of any kind". Reach the instance on the loopback port it binds (`ssh -L` from another host). A Dev Fleet pod boots with this whenever its own checkout declares the flag — the pod's argv is built by the control plane but executed by the target worktree's gateway, so `pod.runtime.target_supports_flag` probes that checkout first and DROPS the flag when it is absent (passing it would make argparse exit 2, which the unit's `Restart=on-failure`/`RestartSec=5` turns into a 5s restart loop). Such a checkout keeps the tunnel behaviour it had before this flag existed and is not given the guarantee — see `security.md` for why no config-side substitute is applied. |
+| `kirocrew gateway --no-tunnel` | Never publish a tunnel: refuses to start or provision one for the life of the process, whatever `tunnel.enabled` says. SCOPED TO TUNNELS — it does not change where the dashboard binds, so a config that widens `dashboard.url` off loopback still does, with token auth as the control there; do not read `publish_disabled()` as "no published surface of any kind". Reach the instance on the loopback port it binds (`ssh -L` from another host). A Dev Fleet pod boots with this whenever its own checkout declares the flag — the pod's argv is built by the control plane but executed by the target worktree's gateway, so `pod.runtime_boot.target_supports_flag` probes that checkout first and DROPS the flag when it is absent (passing it would make argparse exit 2, which the unit's `Restart=on-failure`/`RestartSec=5` turns into a 5s restart loop). Such a checkout keeps the tunnel behaviour it had before this flag existed and is not given the guarantee — see `security.md` for why no config-side substitute is applied. |
 | `kirocrew setup` | Install agent config, save project dir, configure credentials |
 | `kirocrew setup --agent-only` | Only install agent config (skip credentials) |
 | `kirocrew setup --slack` | Run the guided Slack credential + slash-command setup (opt-in) |
@@ -326,17 +326,33 @@ path gives up is ancestor-swap resistance, not link resistance.
 
 Each rule above has one owner. `kiro_crew.snapshot` is the command and API facade: it
 holds `snapshot_main` and `restore_main`, the `MANIFEST.json` writer (`_build_snapshot`),
-the outbound redaction seam, the merge-mode driver and the notification copy. It re-exports
-the owners' names, so every existing import keeps resolving. A test that replaces a helper
-replaces it on the module that calls it.
+the outbound redaction seam, the merge-mode driver and the notification copy.
+`restore_main` sequences extraction and the bundle-shape refusals, and writes their
+`state_restore_rejected` audits. The facade re-exports the owners' names, so every existing
+import keeps resolving. The owners read the helpers, drivers and limits a test replaces
+(`_copytree_safe`, `_do_replace_mutations`, `sqlite3`, `_MAX_ARCHIVE_MEMBERS` and the rest
+of `LATE_BOUND` in `test/test_snapshot_refactor_seams.py`) through `kiro_crew.snapshot` when
+they use them, via `snapshot_components._facade()`, so a patch of one of those names on the
+facade reaches the owners' call sites too, and the facade stays a plain module. Every other
+name an owner uses resolves in that owner's own globals, so a test patches it on the owner
+module. The same test file scans `test/` and every `tests` package under `src/kiro_crew` and
+fails on a patch no call site sees: a facade patch of a name an owner reads from its own
+globals, an owner patch of a `LATE_BOUND` name, and a patch of either whose name it cannot
+resolve outside the sites it lists. No owner imports the facade: `_facade()` reads it from
+`sys.modules`, since the facade imports every owner and is loaded before any of them runs.
+`test_snapshot_refactor_ownership.py` pins both halves: no owner imports the facade, and no
+module outside the snapshot family imports an owner.
 
 - `kiro_crew.snapshot_components` owns the component table, the never-ship and host-local
   rules, and the tree-root check `safe_tree_root`.
 - `kiro_crew.snapshot_archive` owns staging and the bundle format. That covers the pinned
   tree copy with its refusal (`_staging_is_pinned`), the consistent SQLite capture, the
   extraction filter, the archive bound and the manifest readers.
-- `kiro_crew.snapshot_restore` owns the checks that refuse an unsound bundle or an unsafe
-  destination before live state moves, plus the replace transaction and its rollback.
+- `kiro_crew.snapshot_restore` supplies the bundle predicates those refusals rest on
+  (`_component_payload_absent`, `_components_absent_from_bundle`,
+  `_trees_absent_from_bundle`), the content-soundness refusal
+  (`_refuse_corrupt_source_databases`), the destination guards, and the replace transaction
+  with its rollback.
 - `kiro_crew.snapshot_merge` owns the merge algorithms: memory rows, cron jobs,
   notification records and no-overwrite trees.
 
@@ -1059,6 +1075,8 @@ Each step checks if the tool is already installed and skips if present.
 
 One flag is a MODE rather than a check and short-circuits before the list above runs, because it does not answer "is this install healthy": `--bundle` collects the redacted diagnostics zip and prints no health report. It ends with a prefilled `Open a GitHub issue` link whose `version`, `channel` dropdown answer and create-time `channel:` label all come from ONE resolver, `release_channel.provenance()` (shared with the dashboard's Report-a-problem link, which prints the same fields plus the free-form ones): the version is the PUBLIC release version — a repackager's four-part `BUILD_VERSION` stamp such as `0.7.0.5` is folded onto `0.7.0` (`changelog.release_of_build`), while the release pipeline's own spellings (`0.7.0-insider.4`, `0.7.0rc7`, a nightly stamp) are the public identity and stay — and the channel is the lane the build can PROVE from three sources that must agree: the `$KIROCREW_HOME/channel` record when it names a lane, a prerelease marker in the installed distribution's metadata version when it describes the same release (a repackaged insider build keeps its `rc` marker there after the stamp has removed it from `__version__`; PLAIN metadata proves nothing, because the desktop lanes pip-install the checkout and stamp only `__version__`, leaving `pyproject.toml`'s bare version in the dist-info of every lane), and `__version__` itself unless it is a build stamp, which says nothing about its lane. No claim, or claims that disagree (a stable record over a promoted `rc` build, a lane switch not yet updated onto), prefills the form's own `Not sure` and attaches NO `channel:` label, because a create-time label outlives whatever the reporter later picks and a guessed Stable is exactly how packaged insider reports arrived mislabelled (#13168). The raw stamp, the distribution version and the record are recorded in the bundle's private `versions.txt` and `manifest.json` instead. Doctor is otherwise read-only, which is why the ledger cleanup sweep is its own command (`kirocrew ledger-sweep`, see the command table and [session-work-ledger](session-work-ledger.md#cleanup)) rather than a second mode here.
 
+**Where each row lives.** `cli_doctor._doctor` is the orchestrator: it prints the sections above in one fixed order, threads one `issues` list through every section, and turns that list into the closing `❌ Fix these issues:` line with exit status 1, or `✅ Kiro Crew is ready!`. Sections print as they run rather than being collected first, so on an interactive terminal a probe that hangs still leaves every earlier row on screen. Most rows live in `kiro_crew.doctor_checks`, one module per family: `render` (the escaping, indent and wrapping helpers the sections share), `agents`, `mcp`, `confinement` (the sandbox verdict and the shapes that refuse a spawn), `access` (session signing, hook auto-approve, credentials), `install`, `services`, `resources`, `workload`, `channels` and `features` (vector memory, speech-to-text). `cli_doctor.py` keeps the rows the orchestrator composes itself (Platform, and the Dependencies, Agent, Runtime and Connectivity rows built from the values it threads onward) and the rows a repository gate pins to that file: the process-spawning probes `test/test_spawn_audit.py` keys by `cli_doctor.py::<function>` (including the node, venv-interpreter and `kiro-cli --version` rows `_doctor` spawns itself), the agent-spec reads `test/test_agent_spec_hardened_reads.py` inventories for that file (Model, model pins, MCP Governance), the MCP Tools repair and probe, the KAS relay rows whose ACP imports the agent-sdk boundary baseline counts, and the embedding-model URL probe the redactor registry names. `kiro_crew.cli_doctor` stays the one import path and patch target: a family reads every function, class and value the facade binds through the facade at call time (a module is one shared object, so its attributes are what a test patches, and a section that imported a name inside its own body keeps doing so), every name the module held before the move still resolves on the facade (a moved one as the family's own object, with a write there forwarded to the family, so `mock.patch(..., create=True)` must not target one), and a section this move extracted from `_doctor` is patched on its own family module. The families load only when a health report runs, never on `import kiro_crew.cli` or for `--bundle`.
+
 ## Update Command
 
 `kirocrew update` pulls the latest source and rebuilds:
@@ -1481,6 +1499,75 @@ on crash, and starts on boot. Implemented in `src/kiro_crew/service/`.
   - Boot survival via `WantedBy=multi-user.target` (no linger needed —
     that's a user-service concept; this is system-level).
   - Crash-loop safety: `StartLimitBurst=3 StartLimitIntervalSec=300`.
+  - **A home another gateway already serves is not retried.** `kirocrew
+    gateway` takes `<home>/gateway.lock` before it binds anything. One
+    predicate decides whether a refusal is the kind a restart cannot heal:
+    `GatewayLock._serving_verdict` in `gateway_lock.py`, the serving-holder
+    predicate, asked about the process `/proc/locks` positively identifies as
+    the lock's acquirer (of the lock file, or of the home directory when the
+    file has been deleted or replaced) and never about the pid the lock file
+    merely records. It carries four conjuncts, each measured once: that
+    acquirer is alive; it holds the configured dashboard port (one listener
+    enumeration, `platform_compat.find_port_listeners`, filtered to the
+    owner's own sockets); it holds it AT the address the probe reaches — the
+    address this gateway is configured to bind (`KIROCREW_BIND` when it parses
+    as an IP address; an absent override or the IPv4 wildcard `0.0.0.0` is
+    probed at `127.0.0.1`, the IPv6 wildcard `::` at `::1` because the
+    dashboard binds it `IPV6_V6ONLY` and a v4 connect never reaches it) — with
+    the owner's wildcard binds covering that address by family only
+    (`0.0.0.0` covers any v4 host, `::` covers v6 hosts and not v4 ones), and
+    an unreported address or family counting as unknowable, never as covering;
+    and it answers HTTP there. The address conjunct is what ties port ownership
+    and HTTP health to ONE process: port ownership alone is address-agnostic,
+    so without it a stranger answering at the probe address on the same port
+    would be credited to a lock owner bound elsewhere. Only all four make
+    `GatewayLockError.live_holder` True — a sibling gateway serving the home,
+    which this one can displace on neither front while it lives — and then the
+    process exits `gateway_lock.LIVE_HOLDER_EXIT_CODE` (78, `EX_CONFIG`: two
+    supervisors pointed at one home is a host configuration, and the remedy is
+    to change it); the unit's `RestartPreventExitStatus=` names that code, so
+    a `Restart=always` unit goes `failed` once with the refusal line in the
+    journal instead of relaunching every `RestartSec` against a refusal the
+    sibling keeps permanent (bounded by StartLimit* on the shipped unit,
+    unbounded on a unit without them). Every other refusal exits 1, which the
+    unit's `Restart=always` relaunches, because a later attempt can find it
+    cleared or because the evidence for standing down is missing: a lock file
+    replaced faster than it can be locked, a home that cannot be opened or
+    measured for directory locks, an flock whose acquirer is gone (a wedged
+    inheritor holds it until that process dies), a live acquirer that does not
+    hold the port (a sibling still starting, or one shutting down that has
+    closed its listener and releases the lock next), a live acquirer on the
+    port but silent at the probed address — a wedged gateway (a hung process
+    keeps its listening socket bound, and a terminal exit would leave the unit
+    `failed` with nothing left to relaunch once that process dies) or, the
+    **residual row** the predicate leaves unasserted by design, a gateway that
+    holds the port only at another address than this one would bind, or whose
+    socket addresses the platform could not report (probing the holder's own
+    listener address instead is the follow-up tracked in the PR's
+    deferred-finding issue, not a guess made here); the message names what was
+    measured (`holds port N, not answering HTTP at 127.0.0.1`, or `holds port
+    N at ::1, not at 127.0.0.1`) and says the refusal is not treated as
+    permanent — and a holder no surface could identify — no `/proc/locks`
+    (macOS, Windows), or a Linux filesystem whose device numbers never match
+    the lock table (btrfs subvolumes, overlayfs) — where the pid the lock file
+    records may be alive and on the port and still be a reused number rather
+    than the process that holds the lock; the predicate is never asked about
+    it, and that refusal's message says the holder cannot be confirmed and that
+    a supervisor, if one manages the gateway, will retry it (the same message
+    on every platform, since macOS and Windows reach this branch on every
+    refusal). On the identified-acquirer paths one listener enumeration and at
+    most one HTTP probe (its own 1.5 s budget) feed both the message and the
+    exit status, so they cannot disagree; the orphaned-lock path (a dead
+    acquirer, candidate openers) keeps its own per-candidate facts. With no
+    port to weigh (`--port auto`, `--slack-only`) the verdict cannot be reached
+    and every refusal stays restartable. The constant is defined once, beside the
+    refusal in `gateway_lock.py`, and both `cli.py` (the exit) and
+    `render_unit()` (the exemption) import it; `test_service.py` pins the
+    rendered directive to the constant and the constant to 78, because the
+    value is baked into installed units, which `service install` writes once
+    and no upgrade re-renders — a unit written by an earlier build keeps
+    relaunching on this refusal until it is re-rendered. An existing install
+    picks the directive up by re-running `kirocrew service install`.
   - **Two scopes, both visible.** `install` writes the system unit only, but
     the SELinux refusal hands the operator a per-user unit
     (`render_unit(user_scope=True)`, managed with `systemctl --user`), so

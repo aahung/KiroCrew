@@ -4303,6 +4303,10 @@
       "show_pending_tool_call_in_chat": "Show pending tool call in chat",
       "skill": "Skill",
       "slash_commands": "Slash commands",
+      "spawn_awaiting_one": "{{count}} sub-agent is awaiting your approval to run",
+      "spawn_awaiting_other": "{{count}} sub-agents are awaiting your approval to run",
+      "spawn_pending_one": "{{count}} sub-agent pending — answer the request below first",
+      "spawn_pending_other": "{{count}} sub-agents pending — answer the request below first",
       "stop_generation": "Stop generation",
       "stopping": "Stopping…",
       "stopping_2": "Stopping",
@@ -4342,7 +4346,6 @@
       "tab": "tab"
     },
     "commentOverlay": {
-      "add_a_comment": "Add a comment",
       "add_comment": "Add comment",
       "add_instruction": "Add instruction",
       "additional_prompt": "Additional prompt",
@@ -4579,12 +4582,15 @@
       "unknown_error": "The import failed"
     },
     "instanceTabBar": {
+      "chain_via": "{{via}} › {{name}}",
       "instances": "Remote crews",
       "local": "Local",
       "local_dashboard": "Local dashboard",
       "n_unread": "{{n}} unread",
       "switch_crew": "Switch crew",
-      "switch_crew_unread": "Switch crew, {{n}} unread elsewhere"
+      "switch_crew_unread": "Switch crew, {{n}} unread elsewhere",
+      "unreachable": "unreachable",
+      "unreachable_via": "unreachable — {{via}} is down"
     },
     "instancesViewport": {
       "loading_pane": "Loading pane…",
@@ -5083,8 +5089,8 @@
       "faster": "Faster",
       "reasoning_effort": "Reasoning effort",
       "smarter": "Smarter",
-      "use_configured_default": "Use configured default",
-      "use_model_default": "Use model default"
+      "use_configured_default": "Use default effort ({{level}})",
+      "use_default_effort": "Use default effort"
     },
     "registryManager": {
       "add_an_org_registry_to_discover_team_specific_ap": "Add an org registry to discover team-specific apps",
@@ -7799,8 +7805,8 @@
         "actions": "Actions",
         "add": "Add",
         "category": "Category",
-        "consolidated": "Consolidated",
-        "consolidation_idle_hours": "Consolidation idle (hours)",
+        "consolidated": "Summarized",
+        "consolidation_idle_hours": "Summarize after idle (hours)",
         "daily_history": "Daily History",
         "delete": "Delete",
         "delete_failed": "Could not delete the lesson",
@@ -7818,7 +7824,7 @@
         "no_history_yet": "No history yet",
         "no_lessons": "No lessons",
         "no_lessons_yet": "No lessons yet",
-        "no_sessions_to_consolidate_start_a_chat_first": "No sessions to consolidate — start a chat first",
+        "no_sessions_to_consolidate_start_a_chat_first": "No sessions to summarize — start a chat first",
         "preference": "preference",
         "preferences": "Preferences",
         "projects": "Projects",
@@ -9420,7 +9426,9 @@
         "up_to_warm": "Up to {{n}} stay warm at once",
         "use_my_edits_anyway": "Apply my edits to the crew as it is now",
         "your_code": "Your code: {{code}}",
-        "your_crews": "Your crews"
+        "your_crews": "Your crews",
+        "reported_host": "{{host}} (reported)",
+        "reported_host_hint": "This crew reports being on this machine. This dashboard has no route to it and never dials it — the connection rides the crew that reaches it."
       },
       "webhooksPanel": {
         "inbound_webhooks": "Inbound webhooks",

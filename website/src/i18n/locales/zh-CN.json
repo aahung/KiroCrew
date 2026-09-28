@@ -5540,7 +5540,7 @@
       "new_sessions_start_with_this_agent": "新会话将使用该代理",
       "no_matches": "无匹配项",
       "set_default_agent": "将 <agent/> 设为新会话的默认代理",
-      "group_templates_hint": "以共享记忆运行共享模板，不会登记为队友。"
+      "group_templates_hint": "在默认队友的工作区和记忆上运行，不会新建任何内容。"
     },
     "agentImportFlow": {
       "back": "上一步",
@@ -5676,6 +5676,7 @@
       "trust_desc": "在此对话中，{{productName}} 无需先询问即可工作",
       "trust_label": "信任",
       "chat_mode_hint": "对话模式",
+      "trust_scope_tooltip": "此对话由应用授权信任；授权会自行过期。在此菜单中选择“常规”可立即结束；在该应用中关闭之前，应用可能会再次授权。",
       "trust_tooltip": "在此对话中，{{productName}} 无需先询问即可工作",
       "yolo_desc": "在每个对话中，{{productName}} 无需先询问即可工作",
       "yolo_expiration_timed": "Turns itself off after {{duration}}, then asks again.",
@@ -5987,6 +5988,8 @@
       "show_pending_tool_call_in_chat": "在聊天中显示待处理的工具调用",
       "skill": "技能",
       "slash_commands": "斜杠命令",
+      "spawn_awaiting_other": "{{count}} 个子代理等待你批准运行",
+      "spawn_pending_other": "{{count}} 个子代理待处理 — 请先回应下方的请求",
       "steer": "引导",
       "alt_action_hint_queues": "{{chord}} 改为将这条消息排队",
       "alt_action_hint_steers": "{{chord}} 改为用这条消息立即引导",
@@ -6140,7 +6143,6 @@
       "settings_subtitle": "{{tab}} · {{detail}}"
     },
     "commentOverlay": {
-      "add_a_comment": "添加评论",
       "add_comment": "添加评论",
       "add_instruction": "添加指令",
       "additional_prompt": "附加提示词",
@@ -6570,6 +6572,7 @@
       "unknown_error": "导入失败"
     },
     "instanceTabBar": {
+      "chain_via": "{{via}} › {{name}}",
       "connected": "已连接",
       "connected_refresh": "已连接 · {{time}} 后刷新",
       "connected_refreshing": "已连接 · 刷新中…",
@@ -6592,7 +6595,9 @@
       "unpin_crew": "取消置顶 {{name}}",
       "pinned_no_room": "已置顶，顶栅空间不足",
       "keep_tab_order_fixed": "固定标签页顺序",
-      "instances_load_failed": "无法加载远程团队。"
+      "instances_load_failed": "无法加载远程团队。",
+      "unreachable": "连不上",
+      "unreachable_via": "连不上 — {{via}} 挂了"
     },
     "instancesViewport": {
       "connecting": "正在连接…",
@@ -7595,11 +7600,12 @@
       "effort": "强度",
       "effort_help": "推理强度决定模型在回答前思考多久。强度越高，用于思考难题的时间越长（更慢，但答案更好）；越低则越快。关闭会话级覆盖后，会回退到“设置 → 聊天”中的默认值，或在未设置默认值时交由模型自行决定（仅 Fable/Opus/Sonnet）。",
       "faster": "更快",
-      "configured_default_marker": "已配置默认值",
+      "configured_default_marker": "默认推理强度",
+      "slider_locked_hint": "已锁定为默认值。关闭开关即可选择档位。",
       "reasoning_effort": "推理强度",
       "smarter": "更聪明",
-      "use_configured_default": "使用已配置的默认值",
-      "use_model_default": "使用模型默认值"
+      "use_configured_default": "使用默认推理强度（{{level}}）",
+      "use_default_effort": "使用默认推理强度"
     },
     "registryManager": {
       "add_an_org_registry_to_discover_team_specific_ap": "添加组织注册表以发现团队专属应用",
@@ -7757,12 +7763,16 @@
     "selectionToolbar": {
       "ask": "随手问",
       "ask_hint": "打开随手问并引用选中内容——在你点击发送前不会发出任何内容，主聊天不受影响",
+      "close_saving_continues": "关闭——保存仍在继续",
       "comment_input": "对选中文字添加评论",
+      "comment_post_failed": "评论保存失败。你输入的文字还在——请重试。",
+      "comment_post_failed_closed": "关于“{{quote}}”的评论未保存。再次选中这段文字即可找回草稿并重试。",
       "copy": "复制",
       "copy_failed": "复制失败——浏览器阻止了访问剪贴板。请选中文字后手动复制。",
       "copy_selection_hint": "复制选中的文字（而不是你的评论）到剪贴板",
       "more_actions": "针对选中内容的更多操作",
       "press_enter_to_comment": "按 Enter 或点击以评论…",
+      "saving": "保存中…",
       "tap_to_comment": "点按开始写评论…",
       "quote": "引用",
       "quote_hint": "把选中内容引用到本对话的输入框——你的回复会发到主聊天"
@@ -9157,6 +9167,9 @@
     "notifications": "通知",
     "schedule": "日程",
     "sessions": "会话",
+    "search_short": "全部搜索",
+    "home": "主页",
+    "agent_capabilities_short": "能力",
     "settings": "设置",
     "task_runner": "Task Runner",
     "webhooks": "Webhook",
@@ -10420,6 +10433,7 @@
         "copied": "已复制",
         "copy_failed": "复制失败",
         "steering": "正在引导…",
+        "delivery_pending": "正在等待送达…",
         "redirecting_the_running_turn_not_yet_confirmed": "正在重定向正在运行的这一轮——尚未确认。",
         "turn_ended_before_this_applied_runs_as_its_own_message": "这一轮在此生效前已结束，此消息作为独立消息运行。"
       },
@@ -10838,6 +10852,8 @@
       "mcp_session_started": "已在本会话中启动",
       "message_queued_until_session_ready": "{{error}}。消息已排队，会在会话就绪后发送 — 但它只保存在此标签页中，因此离开或刷新页面后需要重新输入。",
       "message_saved_as_draft": "{{error}}。消息已保存为草稿，存放在你发送它的那个会话中。{{extra}}",
+      "more_actions": "更多操作",
+      "update_entry_load_failed": "无法加载更新入口。请在设置中检查更新。",
       "no_results": "无结果",
       "no_tools": "无工具",
       "open_activity_panel": "打开活动面板",
@@ -10896,6 +10912,7 @@
       "send_failed_with_error": "发送失败：{{error}}",
       "send_failed_with_error_restored": "无法发送这条消息：{{error}}。你的文字已放回输入框。",
       "delivery_unconfirmed": "尚未确认送达——你的文字已放回输入框；再次发送前请先查看对话记录。",
+      "delivery_unconfirmed_pending": "尚未确认送达——这条消息可能仍在等待中。如果没有收到回复，请再次发送。",
       "could_not_read_file_reason": "无法读取 {{path}}（{{reason}}）",
       "screenshot_failed_reason": "截图失败：{{reason}}",
       "http_status": "HTTP {{status}}",
@@ -12711,10 +12728,17 @@
         "actions": "操作",
         "add": "添加",
         "category": "类别",
-        "consolidated": "已整合",
-        "consolidated_sessions_failed": "已整合 {{succeeded}}/{{total}} 个会话 ({{failed}} 失败)",
-        "consolidation_idle_hours": "整合空闲时长（小时）",
-        "controls_how_conversation_history_is_consolidate": "控制如何将对话历史整合进记忆。",
+        "consolidated": "已总结",
+        "consolidated_sessions_failed": "已总结 {{succeeded}}/{{total}} 个会话 ({{failed}} 失败)",
+        "consolidated_sessions_skipped_other": "已总结 {{succeeded}}/{{total}} 个会话 — 已跳过 {{count}} 个私密会话（{{modes}}）",
+        "consolidated_sessions_skipped_mode": "已总结 {{succeeded}}/{{total}} 个会话 ({{skipped}} 个已跳过：{{mode}})",
+        "consolidate_failed_summary": "服务器拒绝了一个总结请求，其回复（服务器将此操作称为“consolidation”）显示在下方；其他会话未受影响。如需重试，请点击“立即总结”。",
+        "consolidate_failed_session_other": "{{count}} 个会话失败（第一个：<session>{{session}}</session>）",
+        "consolidate_failed_reply": "服务器的回复：<reply>{{reply}}</reply>",
+        "consolidate_list_failed": "无法列出要总结的会话",
+        "consolidate_list_failed_summary": "服务器没有响应会话列表请求，因此没有总结任何内容。如需重试，请点击“立即总结”。",
+        "consolidation_idle_hours": "空闲后总结（小时）",
+        "controls_how_conversation_history_is_consolidate": "控制如何将对话历史总结进记忆。",
         "daily_history": "每日历史",
         "delete": "删除",
         "delete_failed": "无法删除该课程",
@@ -12724,7 +12748,7 @@
         "delete_unusable_scope_title": "在所有范围中删除此课程？",
         "history_retention_days": "历史保留天数",
         "knowledge": "知识",
-        "learned_user_preferences_coding_style_tools_work": "已学习的用户偏好设置（编码风格、工具、工作流）。由记忆整合自动更新。",
+        "learned_user_preferences_coding_style_tools_work": "已学习的用户偏好设置（编码风格、工具、工作流）。会话总结进记忆时自动更新。",
         "lesson_already_covered": "已有经验涵盖此内容（{{reason}}）。请重新措辞以添加新内容。",
         "lesson_already_stored": "此经验已存储。",
         "lesson_not_saved": "经验未保存（{{reason}}）。请编辑后重试。",
@@ -12736,7 +12760,7 @@
         "no_history_yet": "暂无历史",
         "no_lessons": "无经验",
         "no_lessons_yet": "暂无学习记录",
-        "no_sessions_to_consolidate_start_a_chat_first": "没有可整合的会话 — 请先开始聊天",
+        "no_sessions_to_consolidate_start_a_chat_first": "没有可总结的会话 — 请先开始聊天",
         "persistent_lessons_injected_into_every_session_a": "注入到每个会话的持久经验。自动从Task Runner失败中提取。可通过 'kirocrew learn add' 手动添加。当向量记忆启用时，经验会在“语义”标签页中作为 lesson.* 条目管理。",
         "preference": "偏好",
         "preferences": "偏好设置",
@@ -12753,6 +12777,16 @@
         "scope_workspace": "工作区 {{name}}",
         "semantic_memory_active_text_files_are_read_only": "语义记忆已启用 — 文本文件为只读",
         "session_other": "{{count}} 个会话",
+        "skipped_incognito_session_other": "隐身会话",
+        "skipped_sessions_other": "已跳过 {{count}} 个私密会话（{{modes}}）",
+        "skipped_sessions_mode": "{{skipped}} 个已跳过：{{mode}}",
+        "skipped_temporary_count_other": "临时 {{count}} 个",
+        "skipped_incognito_count_other": "隐身 {{count}} 个",
+        "skipped_modes_breakdown": "{{temporary}}、{{incognito}}",
+        "skipped_modes_unknown": "临时或隐身",
+        "skipped_modes_help": "临时模式从空白开始，不保存任何记忆。隐身模式会使用已知信息，但不保存新记忆。",
+        "skipped_temporary_session_other": "临时会话",
+        "summarize_now_help": "“立即总结”会将对话中的事实、决定和经验写入记忆；对话本身不会被改动。",
         "summarize_now": "立即总结",
         "tool": "工具",
         "when": "时间"
@@ -12948,7 +12982,8 @@
         "update": "更新",
         "validation_findings": "验证结果",
         "version_range": "(v{{from}} → v{{to}})",
-        "workspace": "工作区"
+        "workspace": "工作区",
+        "detail_unreadable": "该候选项的文件无法安全读取，因此无法审核。驳回它即可将其从队列中移除。"
       },
       "steeringTab": {
         "always_on_markdown_conventions_injected_into_eve": "智能体读取的 Markdown 约定。每个文件的包含模式决定何时生效：始终、仅匹配文件时，或按需。全局文件位于 ~/.kiro/steering 并处处生效；工作区文件位于 <project>/.kiro/steering，仅对该项目生效。",
@@ -15797,7 +15832,9 @@
         "up_to_warm": "Up to {{n}} stay warm at once",
         "use_my_edits_anyway": "将我的编辑应用到当前的 Crew 上",
         "your_code": "Your code: {{code}}",
-        "your_crews": "你的 Crew"
+        "your_crews": "你的 Crew",
+        "reported_host": "{{host}}（对方告知）",
+        "reported_host_hint": "这个 crew 自称在这台机器上。本面板没有到它的路由，也从不拨它；连接要靠能到达它那个 crew 转。"
       },
       "webhooksPanel": {
         "inbound_webhooks": "入站 webhook",

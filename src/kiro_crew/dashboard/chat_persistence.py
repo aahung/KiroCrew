@@ -35,6 +35,7 @@ from kiro_crew.config.loader import (
 )
 from kiro_crew.dashboard.channel_slots import slot_closed_since
 from kiro_crew.dashboard.chat_delivery import ATTACHMENT_LIST_MAX_ITEMS, ATTACHMENT_PATH_MAX_LEN
+from kiro_crew.dashboard.chat_title import _TITLE_ORIGINS, _rehydrated_refresh_mark
 from kiro_crew.dashboard.chat_utils import (
     _normalize_model,
     _redact_meta_for_role,
@@ -121,11 +122,6 @@ _SKIP_MEMBER_RESTORE: tuple[str, str] = ("", "__skip__")
 #: slot restored by a caller that forgot to prefetch.
 _IDENTITY_UNRESOLVED: tuple[str, str] = ("", "__unresolved__")
 
-
-# Recognized title-origin values (mirrors chat_title._TITLE_ORIGINS; duplicated
-# here rather than imported to avoid dragging the chat_title import graph into
-# the persistence module's load path).
-_TITLE_ORIGINS = ("auto", "user")
 
 _RESTART_INTERRUPTION_KIND = "gateway_restart_interruption"
 # "app", not "gateway": the sibling relay-interruption row in
@@ -409,6 +405,27 @@ def _rehydrate_slot_title(
     slot._title_origin = _rehydrate_title_origin(titled, metadata.get("title_origin"))
     slot._title_refresh_mark = _rehydrate_title_refresh_mark(metadata.get("title_refresh_mark"))
     slot._title_low_signal = _rehydrate_title_low_signal(metadata.get("title_low_signal"))
+
+
+def _rebase_rehydrated_refresh_mark(slot: _ChatSlot) -> None:
+    """Re-base the restored refresh mark against the user rows the loader kept.
+
+    Call once per rehydrate path, AFTER its message window is appended and its
+    local-turn marker is reconciled: the reconcile can re-append an opening row
+    the periodic flush never wrote, and the mark must match the window the next
+    turn counts over.
+    The window is the latest 500 rows, so the slot's user count restarts below the
+    count the persisted mark was taken at, and the opt-in refresh cadence
+    (``dashboard.title_refresh_every_turns``) would otherwise stay silent until
+    the count climbed past that mark again. Counts user rows over
+    ``slot.messages`` exactly as ``maybe_refresh_title`` does, so the two agree
+    on what a turn is. See ``chat_title._rehydrated_refresh_mark`` for the
+    floor that keeps a spent built-in milestone spent.
+    """
+    if not slot._title_refresh_mark:
+        return
+    user_count = sum(1 for m in slot.messages if m.get("role") == "user")
+    slot._title_refresh_mark = _rehydrated_refresh_mark(slot._title_refresh_mark, user_count)
 
 
 _MAX_HISTORY_CHARS = 8000
@@ -2216,6 +2233,12 @@ def _rehydrate_slot_from_history(
         _had_local_turn_marker = _reconcile_local_turn_marker(
             slot, _local_turn_was_in_flight, _local_turn_prompt_copy, persisted=messages
         )
+        # A session past 500 rows restores fewer user rows than its persisted
+        # refresh mark was taken over; re-base the mark so the opt-in cadence
+        # continues after the reload. After the reconcile, because it can
+        # re-append an opening row the flush never wrote and the mark must
+        # match the window the next turn counts over.
+        _rebase_rehydrated_refresh_mark(slot)
         if _relay_was_in_flight and not _had_local_turn_marker:
             # The gateway crashed while this slot's turn was executing on the peer
             # (flagged in the binding block above). The relay reader died with it
@@ -2755,6 +2778,10 @@ def _apply_recent_session(
     _reconcile_local_turn_marker(
         slot, _local_turn_generation(meta), _local_turn_prompt(meta), persisted=messages
     )
+    # Same as _rehydrate_slot_from_history, and after the reconcile for the
+    # same reason: a session past 500 rows restores fewer user rows than its
+    # persisted refresh mark was taken over.
+    _rebase_rehydrated_refresh_mark(slot)
     logger.info("Restored session %s (%s)", slot_name, slot.title)
 
 

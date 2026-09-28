@@ -1,4 +1,6 @@
-import { safeSetItem, safeSetSessionItem } from '../utils/safeStorage'
+import { safeSetItem } from '../utils/safeStorage'
+import { composerDraftStoreFor } from '../utils/composerDraftStore'
+import { clearAnnotationHighlight, paintAnnotationHighlight } from '../utils/annotationHighlight'
 import { hasCommandModifier } from '../utils/commandModifier'
 import { memo, useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, useImperativeHandle, forwardRef } from 'react'
 import { createPortal } from 'react-dom'
@@ -31,6 +33,8 @@ import { fetchFileRead, fileReadQueryKey, isPartialRead } from '../utils/fileRea
 import { documentBodyEpochNow } from '../hooks/usePanelTabs'
 import { loadCommentDrafts, saveCommentDrafts, setCommentsForFile } from '../utils/commentDrafts'
 import { copyToClipboard } from '../utils/clipboard'
+import { WINDOWS_ABS_PATH_RE } from '../utils/urlTransform'
+import { anchorFromRange } from '../utils/selectionAnchor'
 import { useLanguageGeneration } from '../i18n/useLanguageGeneration'
 
 // ── CSS Custom Highlight API accessors ───────────────────────────────────────
@@ -57,20 +61,9 @@ const FIND_HL_SUPPORTED = !!FindHighlightCtor && !!cssHighlights
 // search at once they would overlap visually, never crash.
 const FIND_HL_ALL = 'mc-find'
 const FIND_HL_CURRENT = 'mc-find-current'
-// File tabs stay mounted while hidden, and each can retain an open comment
-// composer. Aggregate every panel's ranges under the one styled registry name
-// so opening or closing a composer in one tab cannot erase another tab's paint.
-const ANNOTATE_HL = 'mc-annotate'
-const annotationRangesByOwner = new Map<object, Range[]>()
-
-function setAnnotationHighlightRanges(owner: object, ranges: Range[]) {
-  if (!FIND_HL_SUPPORTED || !FindHighlightCtor || !cssHighlights) return
-  if (ranges.length > 0) annotationRangesByOwner.set(owner, ranges)
-  else annotationRangesByOwner.delete(owner)
-  const allRanges = Array.from(annotationRangesByOwner.values()).flat()
-  if (allRanges.length > 0) cssHighlights.set(ANNOTATE_HL, new FindHighlightCtor(...allRanges))
-  else cssHighlights.delete(ANNOTATE_HL)
-}
+// The annotation (open-composer) highlight lives in utils/annotationHighlight:
+// the artifact hosts paint through the same registry name, and ranges are
+// aggregated per owner so one host's open/close cannot erase another's paint.
 
 /**
  * Locate the first char of `selected` in the raw source `content` and return
@@ -90,16 +83,37 @@ export interface BreadcrumbSegment { seg: string; path: string; isFile: boolean 
  *
  * A leading slash is preserved explicitly: joining segments with '/' drops it,
  * which would turn an absolute path into a relative one the folder browser then
- * resolves against the wrong root. Exported for unit tests.
+ * resolves against the wrong root. A drive-rooted Windows path (`C:\x`, `C:/x`)
+ * needs no such restoration: unlike POSIX's leading '/', its root is not a
+ * separator at all, so split()+filter(Boolean) leaves it in place as the first
+ * segment ('C:') and the plain join reconstructs it correctly on its own — the
+ * bug here was never the missing prefix, it was that the OLD split (`/` only)
+ * read a whole backslash path as a single segment. Splitting on either
+ * separator, and rejoining with whichever one the input used, fixes the
+ * Windows shape. Only a drive-rooted path (`WINDOWS_ABS_PATH_RE`) is split on
+ * `\`: on POSIX a backslash is a legal filename character, so
+ * `/tmp/we\ird.md` stays one segment. One exception to the plain join: when the
+ * path is short enough (<= 3 segments) that the drive itself is a shown crumb,
+ * its own path is the drive ROOT (`C:\`), not the bare `C:` the join yields --
+ * on Windows a bare `C:` is drive-RELATIVE (the drive's current directory),
+ * which would break the absolute-path contract of `BreadcrumbSegment`.
+ * Exported for unit tests.
  */
 export function breadcrumbSegments(filePath: string): BreadcrumbSegment[] {
-  const isAbs = filePath.startsWith('/')
-  const allSegs = filePath.replace(/\/+$/, '').split('/').filter(Boolean)
+  const isPosixAbs = filePath.startsWith('/')
+  const isWindows = WINDOWS_ABS_PATH_RE.test(filePath)
+  const sep = isWindows && filePath.includes('\\') ? '\\' : '/'
+  const splitAt = isWindows ? /[\\/]+/ : /\/+/
+  const allSegs = filePath.split(splitAt).filter(Boolean)
   const shown = Math.min(3, allSegs.length)
   return allSegs.slice(-3).map((seg, j) => {
     const absIndex = allSegs.length - shown + j
-    const joined = allSegs.slice(0, absIndex + 1).join('/')
-    return { seg, path: isAbs ? '/' + joined : joined, isFile: absIndex === allSegs.length - 1 }
+    const joined = allSegs.slice(0, absIndex + 1).join(sep)
+    // The drive segment alone (`C:`) is drive-relative; its root needs the
+    // trailing separator (`C:\` / `C:/`) to be absolute.
+    const isDriveSeg = isWindows && absIndex === 0
+    const path = isPosixAbs ? '/' + joined : isDriveSeg ? joined + sep : joined
+    return { seg, path, isFile: absIndex === allSegs.length - 1 }
   })
 }
 
@@ -1038,10 +1052,6 @@ function DiffViewBlock({ diffMode, fileName, originalContent, content, lineNums,
   )
 }
 
-/** In-memory twin of the per-file comment-draft store (see `composerDraftStore`):
- *  the copy that survives a slot switch when sessionStorage refuses the write. */
-const composerDraftMemory = new Map<string, string>()
-
 /** Shared comment overlay — the pending-comment list. (The input itself lives
  *  in `SelectionToolbar`'s composer, which opens on selection.) */
 const CommentOverlayBlock = memo(function CommentOverlayBlock({ onSubmitComments, comments, editComment, removeComment, submitAllComments, connected = true }: {
@@ -1188,31 +1198,11 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   // the API is absent both callbacks are no-ops, matching how find degrades.
   const annotationHighlightOwnerRef = useRef<object>({})
   const clearHighlightMarks = useCallback(() => {
-    setAnnotationHighlightRanges(annotationHighlightOwnerRef.current, [])
+    clearAnnotationHighlight(annotationHighlightOwnerRef.current)
   }, [])
 
   const applyHighlightMarks = useCallback((range: Range) => {
-    if (!FIND_HL_SUPPORTED || !FindHighlightCtor || !cssHighlights) return
-    const treeWalker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT)
-    const textNodes: Text[] = []
-    let node: Node | null
-    while ((node = treeWalker.nextNode())) {
-      if (range.intersectsNode(node)) textNodes.push(node as Text)
-    }
-    if (textNodes.length === 0 && range.startContainer.nodeType === Node.TEXT_NODE) {
-      textNodes.push(range.startContainer as Text)
-    }
-    const ranges: Range[] = []
-    for (const textNode of textNodes) {
-      const start = textNode === range.startContainer ? range.startOffset : 0
-      const end = textNode === range.endContainer ? range.endOffset : textNode.length
-      if (start === end) continue
-      const highlightRange = document.createRange()
-      highlightRange.setStart(textNode, start)
-      highlightRange.setEnd(textNode, end)
-      ranges.push(highlightRange)
-    }
-    setAnnotationHighlightRanges(annotationHighlightOwnerRef.current, ranges)
+    paintAnnotationHighlight(annotationHighlightOwnerRef.current, range)
   }, [])
   useEffect(() => () => clearHighlightMarks(), [clearHighlightMarks])
   const [refreshing, setRefreshing] = useState(false)
@@ -1951,10 +1941,7 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
           // of the same anchor text can be disambiguated at highlight time.
           let startOffset: number | undefined
           try {
-            const preRange = document.createRange()
-            preRange.setStart(root, 0)
-            preRange.setEnd(range.startContainer, range.startOffset)
-            startOffset = preRange.toString().length + (raw.length - raw.trimStart().length)
+            startOffset = anchorFromRange(root, range)?.startOffset
           } catch { /* leave undefined */ }
           return { anchor, rect, range: range.cloneRange(), line: coords?.line, column: coords?.column, startOffset }
         }
@@ -1968,59 +1955,10 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
     return undefined
   }, [content, displayContent, isMarkdown])
 
-  // Composer opened over a selection (SelectionToolbar calls this BEFORE it
-  // focuses the input, while the DOM selection is live): resolve the anchor
-  // and paint the <mark> highlight that stands in for the selection once focus
-  // has taken it. Re-fires on every re-selection, replacing the previous anchor.
-  // Every operation swallows storage errors: a full quota or a refusing
-  // storage (legacy private modes) must never throw out of a keystroke
-  // handler. When sessionStorage refuses, the draft falls back to the
-  // module-level map, which still outlives the panel (a slot switch unmounts
-  // the panel, not the page) — so the common teardown is covered either way.
-  const composerDraftStore = useMemo(() => {
-    const key = `mc-comment-composer-draft:${filePath}`
-    // One record per file, holding a draft per PASSAGE (offset + text), so two
-    // half-written comments on different passages coexist.
-    type Slots = Record<string, string>
-    const slotKey = (anchor: string, start: number) => `${start}|${anchor}`
-    const parse = (raw: string | null): Slots => {
-      if (!raw) return {}
-      try {
-        const parsed = JSON.parse(raw) as unknown
-        if (!parsed || typeof parsed !== 'object') return {}
-        const out: Slots = {}
-        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) if (typeof v === 'string') out[k] = v
-        return out
-      } catch { return {} }
-    }
-    // Both copies, merged per passage with memory winning: `save` always writes
-    // memory and writes sessionStorage only when that succeeds, so after a quota
-    // rejection the memory copy is the newer one for the slots it holds, while
-    // sessionStorage still carries slots from before this page load.
-    const load = (): Slots => {
-      let fromSession: Slots = {}
-      try { fromSession = parse(window.sessionStorage.getItem(key)) } catch { /* unavailable */ }
-      return { ...fromSession, ...parse(composerDraftMemory.get(key) ?? null) }
-    }
-    const save = (slots: Slots) => {
-      if (Object.keys(slots).length === 0) {
-        composerDraftMemory.delete(key)
-        try { window.sessionStorage.removeItem(key) } catch { /* unavailable */ }
-        return
-      }
-      const raw = JSON.stringify(slots)
-      composerDraftMemory.set(key, raw)
-      // The write goes through the helper so a full or denied store can never
-      // raise on the render path; the in-memory copy above is what actually
-      // serves this tab, so a dropped mirror degrades exactly as before.
-      safeSetSessionItem(key, raw)
-    }
-    return {
-      read: (anchor: string, start: number): string | null => load()[slotKey(anchor, start)] ?? null,
-      write: (text: string, anchor: string, start: number) => { const slots = load(); slots[slotKey(anchor, start)] = text; save(slots) },
-      clear: (anchor: string, start: number) => { const slots = load(); delete slots[slotKey(anchor, start)]; save(slots) },
-    }
-  }, [filePath])
+  // Where an in-progress comment lives between teardowns the toolbar cannot
+  // guard (a chat-slot switch replaces the side panel wholesale). Per file,
+  // per passage; see `composerDraftStoreFor`.
+  const composerDraftStore = useMemo(() => composerDraftStoreFor(`mc-comment-composer-draft:${filePath}`), [filePath])
 
   // An unsaved comment draft makes this tab NOT clean for the navigate/close
   // guards below: a rail click must open the next file beside it rather than
@@ -2102,6 +2040,8 @@ export default memo(forwardRef<MarkdownPanelHandle, Props>(function MarkdownPane
   const confirmDiscardDraft = useCallback(() => confirm({
     title: i18nT('components.markdownPanel.discard_unsaved_comment'),
     confirmLabel: i18nT('components.markdownPanel.discard_comment_button'),
+    // The same prompt is raised from inside the full-screen shell (z-[9999]).
+    layer: 'top',
   }), [confirm])
   // Where an in-progress comment lives between teardowns the toolbar cannot
   // guard (a chat-slot switch replaces the side panel wholesale). Per file, in

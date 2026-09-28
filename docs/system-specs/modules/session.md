@@ -505,6 +505,29 @@ from orphan cleanup by `_starting_pids`, and every stamp await sits under a
 teardown guard so cancellation cannot leak a started child. An unstamped
 child keeps exactly the pre-stamping protections.
 
+**Live-account spare** (`spawned_under`, inside the sweep): a session or
+companion runtime whose spawn stamp EQUALS the live fingerprint — the whole
+fingerprint, both components — provably authenticated as the live account and
+is skipped by `retire_kiro_identity_sessions`: not retired, not flagged, and
+not counted against completeness (the runtime reapers take the fingerprint as
+`live=` and apply the same test to their post-conditions). Without it the
+sweep retired every kiro-backed idle session and could complete only when
+every kiro-backed holder was idle at once, which a busy gateway never is:
+each turn re-swept, and an idle parent whose `spawn_run` children were still
+running was retired with them — every subagent on the host died as
+`AcpProcessDied ... (provider shutdown)` on every turn any chat took
+(#14605). The spare is the strict converse of the mismatch gate: a mismatch
+is proven component-wise (a read can only LOSE components), a spare needs
+exact equality, an unstamped child is never spared, and an empty live
+fingerprint (unreadable store, and the sign-out path, which sweeps with no
+fingerprint on purpose) spares nothing. The sweep's release is pinned to the
+runtime it inspected (`release_subagent_runtime(key, expected=runtime)`): it
+decides from a snapshot and then waits for the per-parent spawn lock, and a
+respawn holding that lock installs a live-stamped replacement under the same
+key before letting go, so a pop by key alone would kill the runtime the spare
+exists to keep. A release whose pin no longer matches pops nothing, returns
+`False`, and leaves the replacement to the post-condition.
+
 **Per-turn stamp gate** (`flag_identity_stamp_mismatches`, before the
 unchanged early-return in the turn gate): a session whose stamp provably
 differs from the live account is flagged `retire_on_identity_change` and its
@@ -2209,7 +2232,41 @@ any other backend left to `session/load` — has ONE definition:
 `_RESUMABLE_JSONL_MIN_BYTES` read through `_jsonl_holds_a_turn`, which `get()`
 prunes on directly and `session_files_resumable(sid, provider)` wraps together with
 the `.json` and provider checks for a reader outside the module (the sub-agent
-orphan notice's resume hint), so the two cannot drift.
+orphan notice's resume hint), so the two cannot drift. Both stale paths (`get()`
+and `prune()`) ask `_keeps_entry`: an entry carrying a durable setting,
+a generation floor, a channel binding (`_survives_prune`), or a `temporary` /
+`incognito` privacy flag loses only its dead `sid` and keeps the rest -- with no
+transcript read, because both run under the map lock on the event loop. A
+privacy-flagged row is removed by NO path, whatever its transcript header says:
+the flag is the record the channel's inbound gate hydrates from
+(`privacy_mode.hydrate` restores the trackers from the map alone, never from the
+header), so a row removed for any reason leaves that gate reading the thread as
+persistent after the next restart -- its turns persisted, agent memory writes
+admitted. The header is still ensured: `start_pool` runs
+`SessionMap.stamp_privacy_headers()` right after `prune()` -- awaited in place on
+the blocking path, inside the task the non-blocking path already schedules on
+the other (the live-config appliers and the dashboard's background-session
+restart return without waiting on the sweep, whose cost scales with the
+retained rows) -- which lists every
+flagged row under the lock with no filesystem call (`privacy_flagged_entries`
+-- channel-bound or not, live `sid`, cleared `sid` or none, because the header
+is the record for the thread, not for the provider session) and, on a worker
+thread with no lock held, probes each row's transcript header and copies the
+mode into it where it is missing or weaker (`_header_records_privacy_mode`,
+tighten-only, `require_existing`: never creating a transcript). It returns a
+count and removes nothing. A flag TIGHTENED while the probe ran off the loop
+leaves the header stamped with the mode the worker saw -- never looser than
+before -- and the next pass reads the current flags and re-stamps the tightened
+mode. The retained rows are bounded at `PRIVACY_ROW_CAP` (the trackers' own
+`PRIVACY_LRU_MAX`, 10,000) and the bound is held by refusing, never by evicting:
+a NEW privacy flag past it is refused fail-closed by `SessionMap.set_flag`
+(`PrivacyRowRefused`; the modifier then tells the user the message was not
+processed and does not run it), a key over `PRIVACY_ROW_KEY_MAX` (200) is
+refused at the same gate, tightening a row already retained is never refused,
+and no retained row is ever evicted -- it is the record the channel gate
+hydrates from. Retiring rows once the header carries the mode needs the channel
+gate to read the header, a separate change. Immortality of durable
+settings stays opt-in (`_DURABLE_FLAGS`).
 
 **Mapped-session enumeration:** `SessionMap.mapped_sids_by_key()` returns session
 key → kiro-cli session ID for every entry that has one. Disk accounting

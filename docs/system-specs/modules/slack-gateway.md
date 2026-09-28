@@ -109,6 +109,31 @@ allocation. Unlinking returns to the canonical Slack conversation; pinned answer
 retain their asker. Transport also retains its privacy-boundary owner check.
 Cached overrides keep the existing synchronous no-I/O fast path.
 
+**Thread parent for a new Slack-born session.** A reply can open a Slack-born
+session (`slack:<ts>`) in a thread it did not start: the owner answering an
+agent's `send_message(session="slack")` DM, a reply under a cron post, a reply
+in someone else's channel thread. When that session is fresh and its transcript
+has no user or assistant row yet, both dispatch paths read the thread's first
+message once (`slack/thread_parent.py`, via `SlackClientOps.fetch_message_detail`):
+
+- The model gets it only as `thread_parent_text`, inside the fenced,
+  injection-screened `[SLACK THREAD CONTEXT — UNTRUSTED DATA]` block. A parent
+  matching an injection pattern stays withheld there.
+- The transcript gets one `notice` row above the reply, attributed to its author
+  (the posting app's name, else the user's real name), which the dashboard draws
+  as a notice card with its line breaks kept. A `notice` is display-only
+  (`history_projection.DISPLAY_ONLY_ROLES`): it is outside `RECALL_ROLES`, and
+  `recent_with_provenance`, memory consolidation and auto-skill detection skip it,
+  so no replay, recall, compression or memory pass hands it to a model.
+  Consolidation still moves its offset past the row. An injection-matching
+  parent's text is withheld from the row too, and the row's text goes through the
+  prompt block's marker neutralizers. Incognito and temporary sessions get no row.
+
+Dashboard-linked threads and sessions with prior turns fetch and record nothing.
+The transport path persists the user's row at receipt, so it builds the prompt
+with `exclude_last_n=1`; otherwise the history fallback replays the reply as the
+thread's history.
+
 ## Architecture
 
 Channel startup diagnostics receive setting names and boolean presence checks,
@@ -144,6 +169,7 @@ Slack Socket Mode → events.py (dispatch) → handler.py → SessionManager →
 | `slack/transport.py` | `SlackTransport` — Slack as a concrete `MessagingTransport` with a deny-by-default `authorize`. No live path constructs it; only `channel_type` is read, by `handlers_system` |
 | `slack/transport_dispatch.py` | The new-path dispatch `events.py` routes to when `messaging.use_transport` is on: `handle_message_transport` builds a `TurnDriver` and `SlackRenderer` over the existing Slack client. It does not go through `SlackTransport.receive` or `authorize` |
 | `slack/sessions_view.py` | Slack half of the recent-sessions list shared by the slash command, the DM keyword and the App Home tab; collection lives in `messaging/sessions_view.py` |
+| `slack/thread_parent.py` | The first message of a thread a new Slack-born session was opened in: fetched once for the fenced prompt block and recorded once as a display-only `notice` transcript row (see "Thread parent for a new Slack-born session") |
 
 ## APIs
 
@@ -194,6 +220,7 @@ a restart-on-failure supervisor never relaunches an exit 0:
 | 0 | operator (SIGTERM, `systemctl stop`, Ctrl+C) | stay down as asked |
 | 75 (`EX_TEMPFAIL`) | stale-asset watchdog | the served assets vanished |
 | 69 (`EX_UNAVAILABLE`) | listener guard (`dashboard/listener_guard.py`) | the TCP listener could not be restored, so the process was alive but unreachable |
+| 78 (`EX_CONFIG`) | gateway lock refusal (`gateway_lock.LIVE_HOLDER_EXIT_CODE`), before the gateway runs — not a shutdown | the serving-holder predicate (`GatewayLock._serving_verdict`) is True: the process `/proc/locks` positively identifies as holding `gateway.lock` is running, holds the configured dashboard port with its OWN socket at the address this gateway is configured to bind, and answers HTTP there — a sibling gateway already serves this home. The systemd unit's `RestartPreventExitStatus=` names this one status so it is NOT relaunched (see [cli](cli.md), *Service Management*); every other lock refusal — a holder no surface can identify, however the recorded pid looks; a holder whose own socket at the probed address is silent (a wedged gateway); a holder on the port only at another address, or one the platform did not report (the residual row, unasserted by design, so a stranger's answer there is never credited to it) among them — exits 1 and is relaunched |
 
 The listener-guard path is Windows-only in practice: CPython's proactor loop
 closes the LISTEN socket after one failed `accept()` and never re-arms it. The

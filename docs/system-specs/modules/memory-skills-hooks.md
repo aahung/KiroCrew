@@ -328,6 +328,13 @@ maintenance and cannot hold the write lock during provider inference. Before a
 retry calls a provider, a committed receipt recovers a lost transcript progress
 acknowledgement and leaves later appended messages pending.
 
+Display-only rows (`history_projection.DISPLAY_ONLY_ROLES`, the `notice` role)
+never reach a consolidation or skill-detection prompt: they are drawn for the
+person reading the transcript, and the Slack thread-parent notice carries
+untrusted text. They stay in the snapshot, and a span holding nothing else
+costs no model call: a history pass marks it consolidated, while a
+skill-detection pass leaves the offset alone.
+
 The following file-oriented flow and independent writes describe V1.
 
 How a user message becomes durable memory:
@@ -409,7 +416,52 @@ Idle detection: `_last_activity[key]` updated on every `maybe_consolidate()` cal
 
 **Both paths write to the session's captured store.** `_consolidate` captures the
 canonical execution context before its first await and refuses incognito or
-temporary sessions before reading their transcripts. V2 uses that context's exact
+temporary sessions before reading their transcripts. A channel thread's
+`!temporary` / `!incognito` mode lives in two durable records for two readers:
+the session map's flag (`SessionMap.set_flag`, keyed by the live `slack:<ts>`
+key) is what the channel's inbound gate hydrates from per message, and the
+transcript header's `memory_mode` is what every memory reader refuses on -- this
+pass's pre-snapshot check, the derivation seam (`TranscriptWithheld`) and the
+publication hold around each durable write, above. `privacy_mode._commit_mode`
+writes both, the row first and then the header, tighten-only against the
+header's mode read NORMALIZED (`history.transcript_privacy_mode`: the shared
+predicate's `lower()` and set, returning the mode, so a header spelled
+`Temporary` is the stricter mode it is rather than an unknown string an
+incognito stamp would overwrite; upserted, so a thread flagged before its first
+turn gets a metadata-only header that `ConversationLog.append` then keeps), so a
+transcript read never depends on the session map. A privacy flag keeps its map
+entry alive through `SessionMap.prune` and the per-read repair, both of which
+run under the map lock on the event loop and read no transcript, and through
+every other path: no step removes a privacy-flagged row, whatever the header
+says, because the gate hydrates from the map alone and a removed row leaves it
+reading the thread as persistent after the next restart. The header of a row
+flagged before the stamp existed is ensured by `SessionMap.stamp_privacy_headers`,
+which the session pool's `start_pool` runs right after `prune` (awaited in place
+by a blocking start; inside the already-scheduled task by a non-blocking one, so
+a live-config apply or a background-session restart never waits on it): every
+flagged row is named under the map lock (a snapshot of candidates, no file
+touched), then each row is re-read and stamped under that session's
+durable-write lock (`privacy_mode._serialized`, the lock the modifier's commit
+and a reservation's release hold across their own row-and-header sequences): a
+row the re-read finds unflagged is skipped, and a row still flagged has its
+existing transcript's header probed on a worker thread and the mode copied in
+where it is missing or weaker (tighten-only, never creating a transcript).
+Serialized because the snapshot goes stale under live traffic: a reservation
+released after the snapshot restores the header and clears the row, and a stamp
+from the snapshot alone re-wrote the released mode into that header over a row
+that was gone -- which nothing loosens again (the sweep only tightens, from
+rows; a later release of the same mode reads the stale stamp as its own
+`header_before`), so the thread's consolidation stayed refused for good. A flag
+tightened during the probe is re-stamped by the next pass, and a header that
+already records the mode costs no write (`needs_tightening`). The rows are
+capped at `SessionMap.PRIVACY_ROW_CAP` (the trackers' `PRIVACY_LRU_MAX`), held
+by refusing a NEW flag fail-closed -- the modifier tells the user the message
+was not processed and does not run it -- never by evicting a retained row.
+Retiring those rows needs the inbound gate to read the header, a separate
+change. This pre-snapshot refusal is the memory-mode choke point every entry
+point inherits (idle sweep, `maybe_consolidate`, expiry sweep, dashboard
+trigger, CLI); the dashboard trigger adds its own target-side 403 in front of it
+(see the route table below). V2 uses that context's exact
 member store and commits learned records, history and the retry receipt in one
 SQLite transaction. V1 retains `context.store_of_session(log, key)` and its
 Markdown and lesson fallback behavior. See [Memory across surfaces and channels](#memory-across-surfaces-and-channels).
@@ -2343,7 +2395,7 @@ before reading transcript bodies, opening learned memory or billing a model.
 | POST | `/api/memory/migrate` | Migrate markdown → structured memory (gated) |
 | POST | `/api/memory/import` | Import from JSON export (gated) |
 | POST | `/api/memory/promote` | Promote repeated episodic patterns to semantic facts, tombstoning the rows folded in (gated) |
-| POST | `/api/memory/consolidate` | Trigger consolidation for one session (restricted-mode check only) |
+| POST | `/api/memory/consolidate` | Trigger consolidation for one session. Gated on the caller like every write, and additionally on the TARGET: the body's `key` is resolved through `resolve_session_memory_mode` (live slot first, then the persisted execution record and transcript header) and a temporary or incognito target is 403 `restricted_target_session` (the body carries the target's `mode` as a field, which the Memory tab's tally names) before the running claim or any other work. A channel transcript reaches the route as its filename stem (`slack_<ts>`), so the stem is first unfolded to the thread's live key through the session map (`channel_key_for_stem`) and the thread's flag is read there. When that live resolution does not refuse, the route reads the transcript header under `key` exactly as `_consolidate` does (`get_metadata`, the mode normalized), so a stem the map cannot unfold, or an entry the map no longer holds, is refused from its header here instead of answering 200 for a pass the consolidator refuses. A key no record calls restricted proceeds |
 | GET | `/api/memory/context-preview?q=` | Preview injected semantic + episodic context |
 | GET | `/api/memory/observability?q=` | `stats` + `rejections` + `context_preview`, plus `reads` — the read-volume counters (see above). `reads` is resolved LAST, so it INCLUDES the reads this request itself performed; that is what lets a caller issue the same `q` twice and compare the two objects |
 | GET | `/api/memory/recall?q=` | V2 task recall with evidence. Explicit `store` requires the dashboard owner; the authenticated MCP path uses the owning session's canonical execution context and requires memory reads to be allowed. Invalid or unavailable member memory returns an explicit error |
@@ -2728,7 +2780,7 @@ concurrent native write from being duplicated.
 
 User-taught corrections ("always do X", "never do Y"). Single write path through `vector_memory.write_lesson()`:
 
-1. **Vector memory** (primary): stored as `lesson.<md5hash>` semantic entries with `confidence=1.0, source=user_explicit`. The value is a mapping `{"rule", "category", "negative"}`, plus `"repo_scope"` when the lesson is restricted to one repository — the NOT-clause is a separate field; legacy in-band `"rule — NOT: negative"` rows stay readable without migration. Injected via `get_lessons_context()` — separate from `[Semantic Memory]` block. A scoped lesson is gated by `project_scope.project_scope_satisfied` against the session's active project BEFORE the shown/omitted counts are computed, using the same rule as a skill's `repo_scope`.
+1. **Vector memory** (primary): stored as `lesson.<md5hash>` semantic entries with `confidence=1.0, source=user_explicit`. The value is a mapping `{"rule", "category", "negative"}`, plus `"repo_scope"` when the lesson is restricted to one repository — the NOT-clause is a separate field; legacy in-band `"rule — NOT: negative"` rows stay readable without migration. Injected via `get_lessons_context()` — separate from `[Semantic Memory]` block. A scoped lesson is gated by `project_scope.project_scope_satisfied` against the session's active project BEFORE the shown/omitted counts are computed, using the same rule as a skill's `repo_scope`. A row whose stored `value_json` does not decode is skipped with one warning naming its key (never its value), so one bad row cannot fail every context build.
 2. **V1 JSONL fallback** (`~/.kiro/crew/lessons.jsonl`): only used when vector memory is not initialized. Read-only migration source once vector memory is active.
 
 **V1 priority**: vector lessons override JSONL. V2 never constructs a JSONL lesson store or falls back to one; an empty SQLite lesson table is a valid empty result. The fallback is keyed on whether the
@@ -3847,7 +3899,7 @@ its author can make. Absent or malformed, the field means inject.
 
 The `false` value carries no new privilege surface: it can only reduce what a
 skill delivers, and foreign-imported skills are refused for declaring `triggers`
-at all (`onboarding_import.py`), so an import cannot reach either path.
+at all (`_skill_package` in `onboarding_scan.py`), so an import cannot reach either path.
 
 **Disabled-app skill gating.** When an app is disabled (`_disabled_app_names()`),
 its bundled skills are withheld across all user-facing surfaces: trigger matching
@@ -4276,7 +4328,8 @@ security decision or the copied content.
 
 | Status | `code` | `PendingApprovalRefused.reason` | Meaning to a client |
 |--------|--------|--------------------------------|---------------------|
-| 404 | `pending_skill_not_found` | `not_found` | No candidate at that slug (unsafe slug or no `SKILL.md`). The row is gone; refetch the list. |
+| 404 | `pending_skill_not_found` | `not_found` | There is genuinely no candidate at that slug — an unsafe slug, or no `SKILL.md`. The row is gone; refetch the list. |
+| 404 | `pending_skill_unreadable` | — | The candidate IS still staged, but the pinned detail read refuses its tree as not plain: a link at ANY top-level name (including one nothing reads, since approve refuses a stray entry outright), a link swapped in while the read was running, a present `.meta.json` unreadable through the pin, a `scripts/` tree the pinned walk declines, or a tree over the read's budget (more than `_PENDING_SCRIPT_MAX_ENTRIES` entries at the root or across `scripts/`, or a file over `MAX_SCRIPT_BYTES` — the verdict walk's own constants, so the two agree on what is readable). A SEPARATE code because `list_pending_skills` applies none of those refusals, so the row REMAINS: answering `not_found` here would tell the user the candidate was approved or dismissed elsewhere while it sits in front of them, and point them away from the one action that does apply. The panel renders `pages.overview.skillsTab.detail_unreadable` for it. Unparseable `.meta.json` CONTENT is not a refusal at all: metadata comes back empty and the candidate stays reviewable. The staged/absent split is decided by a by-name probe that runs only AFTER the pinned read refused, so losing its race changes the message and can never grant a read. |
 | 409 | `live_skill_exists` | `live_exists` | A live `auto/<slug>` already holds the name (new-candidate path only). |
 | 422 | `script_validation_failed` | `script_validation_failed` | Body adds `report`: the `validate_scripts` `{filename: [finding, ...]}` map, redaction-scrubbed by `_redact_validation_report` (every filename and finding string through `redact_exfiltration_urls` + `redact_credentials`, redacted BEFORE shortening so a cut cannot leave a credential fragment the scrubber no longer recognises) and BOUNDED at retention: at most `_PENDING_SCRIPT_MAX_ENTRIES` filename entries, `_VALIDATION_REPORT_MAX_FINDINGS` findings each, `_VALIDATION_REPORT_MAX_STRING_CHARS` characters per string. Anything dropped — including entries whose redacted names collide — is counted once under a `<truncated>` key, so a shortened report never reads as a complete one. Raised on the raw scripts, or on the re-validation after in-place redaction. |
 | 409 | `pending_approval_refused` | any other | Body adds `reason`: `target_missing` or `stale_base` (update candidates), `invalid_layout`, `redaction_failed`, or `promotion_failed`. |

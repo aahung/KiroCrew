@@ -23,20 +23,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kiro_crew import pinned_fs, platform_compat
-from kiro_crew._sqlite_compat import sqlite3
-from kiro_crew.jsonl_util import RECORD_CAP, UndecodableRecord, UnreadableRecord, strict_raw_records
+from kiro_crew.jsonl_util import RECORD_CAP, UndecodableRecord, UnreadableRecord
 from kiro_crew.memory_stores import (
     MEMORY_STORES_DIR_NAME,
     is_host_local_store_state,
     memory_store_namespace_lock,
 )
 from kiro_crew.snapshot_archive import (
-    _copytree_safe,
-    _report_skip,
     _safe_name,
-    _staging_is_pinned,
 )
 from kiro_crew.snapshot_components import (
+    _facade,
     is_product_tree_database,
 )
 
@@ -67,14 +64,42 @@ def _copy_tree_no_overwrite(src: Path, dst: Path, *, allow_unpinned: bool = Fals
     parameter on one primitive rather than a parallel implementation the shared
     module's own docstring says should not exist.
     """
-    if not _staging_is_pinned(allow_unpinned=allow_unpinned, what=f"restore of {dst.name!r}"):
-        for item in src.rglob("*"):
-            if item.is_symlink():
-                continue
-            target = dst / item.relative_to(src)
-            if item.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif item.is_file():
+    facade = _facade()
+    if not facade._staging_is_pinned(
+        allow_unpinned=allow_unpinned, what=f"restore of {dst.name!r}"
+    ):
+        # Top-down with PRUNING, not `rglob("*")`. The distinction is the whole fence:
+        # `rglob` yields a link's descendants whatever the loop body then does with the
+        # link itself, so skipping the entry alone still copied the target's contents in
+        # -- and the per-file `mkdir(parents=True)` below rebuilt the very directory the
+        # skip meant to prune. `os.walk(topdown=True)` lets the walk be told not to
+        # descend, by editing `dirnames` in place, so a pruned directory yields nothing.
+        #
+        # Both link predicates, as the sibling fallbacks in `snapshot_restore` and
+        # `snapshot_archive` spell it: `is_symlink()` answers False for a Windows
+        # directory junction, and Windows is exactly where this branch runs -- `dir_fd`
+        # is missing there, so the pinned path is unavailable and an operator who passed
+        # `--allow-unpinned-staging` lands here. The opt-in accepts a BY-NAME traversal,
+        # which no screen here can make safe; it does not accept a link fence that sees
+        # only half the links the platform has, nor one that prunes a name while the
+        # walk keeps handing out what is behind it.
+        def _is_link(path: Path) -> bool:
+            return path.is_symlink() or pinned_fs.is_reparse_point(path)
+
+        for parent, dirnames, filenames in os.walk(src, topdown=True):
+            here = Path(parent)
+            kept = [d for d in dirnames if not _is_link(here / d)]
+            for pruned in [d for d in dirnames if d not in kept]:
+                facade._report_skip(pinned_fs.SKIP_SYMLINK, str(here / pruned))
+            dirnames[:] = kept
+            for name in kept:
+                (dst / (here / name).relative_to(src)).mkdir(parents=True, exist_ok=True)
+            for name in filenames:
+                item = here / name
+                if _is_link(item):
+                    facade._report_skip(pinned_fs.SKIP_SYMLINK, str(item))
+                    continue
+                target = dst / item.relative_to(src)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 # `copy2` opens the destination BY NAME for writing, so a symlink planted
                 # at that name after a `not target.exists()` check is followed and an
@@ -86,7 +111,7 @@ def _copy_tree_no_overwrite(src: Path, dst: Path, *, allow_unpinned: bool = Fals
                 # followed, and O_EXCL subsumes the skip-if-present behaviour
                 # `not target.exists()` provides -- without the race.
                 pinned_fs.copy_file_pinned(
-                    str(item), str(target), skip_existing=True, on_skip=_report_skip
+                    str(item), str(target), skip_existing=True, on_skip=facade._report_skip
                 )
         return
 
@@ -94,7 +119,7 @@ def _copy_tree_no_overwrite(src: Path, dst: Path, *, allow_unpinned: bool = Fals
         src,
         dst,
         what=f"restore of {dst.name!r}",
-        on_skip=_report_skip,
+        on_skip=facade._report_skip,
         skip_existing=True,
     )
 
@@ -126,8 +151,9 @@ def _merge_memory(src_db: Path, dst_db: Path) -> None:
     # manager commits or rolls back the TRANSACTION and leaves the connection OPEN. The
     # handle it kept on src_db made the caller's extraction temp dir undeletable on
     # Windows, which is how this surfaced.
+    facade = _facade()
     try:
-        with closing(sqlite3.connect(str(src_db))) as check_conn:
+        with closing(facade.sqlite3.connect(str(src_db))) as check_conn:
             result = check_conn.execute("PRAGMA integrity_check;").fetchone()[0]
         if result != "ok":
             print(f"  ⚠️  Source DB integrity check failed: {result} — skipping merge")
@@ -136,7 +162,7 @@ def _merge_memory(src_db: Path, dst_db: Path) -> None:
         print(f"  ⚠️  Source DB unreadable: {e} — skipping merge")
         return
 
-    conn = sqlite3.connect(str(dst_db))
+    conn = facade.sqlite3.connect(str(dst_db))
     conn.execute("BEGIN")
     attached = False
     try:
@@ -173,7 +199,7 @@ def _merge_memory(src_db: Path, dst_db: Path) -> None:
                 after = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
                 label = table.replace("_", " ").title()
                 print(f"  {label} imported: {after - before}")
-            except sqlite3.OperationalError as e:
+            except facade.sqlite3.OperationalError as e:
                 import logging
 
                 # The snapshot command's logger: every snapshot/restore diagnostic reports
@@ -489,12 +515,15 @@ def _merge_notifications(src_path: Path, dst_path: Path) -> None:
     after it. Without that, two records glued into one line that parses as
     neither.
     """
+    facade = _facade()
     existing: set[tuple[Any, ...]] = set()
     dst_unterminated = False
     try:
         with open(dst_path, "rb") as f:
-            for record in strict_raw_records(f, dst_path, cap=_NOTIFICATION_RECORD_CAP):
-                key = _notification_key(record, dst_path)
+            for record in facade.strict_raw_records(
+                f, dst_path, cap=facade._NOTIFICATION_RECORD_CAP
+            ):
+                key = facade._notification_key(record, dst_path)
                 if key is not None:
                     existing.add(key)
                 dst_unterminated = not record.endswith(_TERMINATORS)
@@ -514,8 +543,10 @@ def _merge_notifications(src_path: Path, dst_path: Path) -> None:
     # duplicate.
     try:
         with open(src_path, "rb") as f:
-            for record in strict_raw_records(f, src_path, cap=_NOTIFICATION_RECORD_CAP):
-                _notification_key(record, src_path)
+            for record in facade.strict_raw_records(
+                f, src_path, cap=facade._NOTIFICATION_RECORD_CAP
+            ):
+                facade._notification_key(record, src_path)
     except (OSError, UnreadableRecord) as exc:
         # The PATH goes through `_safe_name` because a bundle chooses its own inner
         # root, so an archive-derived path can carry ANSI controls -- and printing
@@ -537,8 +568,10 @@ def _merge_notifications(src_path: Path, dst_path: Path) -> None:
         with open(dst_path, "ab") as out, open(src_path, "rb") as f:
             if dst_unterminated:
                 out.write(b"\n")
-            for record in strict_raw_records(f, src_path, cap=_NOTIFICATION_RECORD_CAP):
-                key = _notification_key(record, src_path)
+            for record in facade.strict_raw_records(
+                f, src_path, cap=facade._NOTIFICATION_RECORD_CAP
+            ):
+                key = facade._notification_key(record, src_path)
                 # A `None` key means the record did not PARSE, so it may be a
                 # framing fragment rather than a record -- nothing it could be a
                 # duplicate OF. Both `existing.add` sites refuse `None`, which is
@@ -775,6 +808,7 @@ def _install_notifications(src_path: Path, dst_path: Path) -> None:
     line and produce one line that parses as neither row. It is the same repair the
     merge makes through ``dst_unterminated``.
     """
+    facade = _facade()
     # `_notification_key`'s result is discarded -- it is called for the
     # `UndecodableRecord` it raises, which its own docstring documents as how the
     # encoding property is enforced. Reusing the merge's predicate rather than
@@ -861,11 +895,11 @@ def _install_notifications(src_path: Path, dst_path: Path) -> None:
                 chunk = src.read(1 << 20)
                 if not chunk:
                     break
-                if len(acc) + len(chunk) > _NOTIFICATION_SOURCE_CAP:
+                if len(acc) + len(chunk) > facade._NOTIFICATION_SOURCE_CAP:
                     raise OSError(
                         f"notification source is at least "
                         f"{len(acc) + len(chunk)} bytes, over the "
-                        f"{_NOTIFICATION_SOURCE_CAP} byte limit -- refusing rather "
+                        f"{facade._NOTIFICATION_SOURCE_CAP} byte limit -- refusing rather "
                         "than importing part of it"
                     )
                 acc.extend(chunk)
@@ -881,12 +915,16 @@ def _install_notifications(src_path: Path, dst_path: Path) -> None:
         # merge branch uses. A second splitter is how two paths drift apart, which is
         # the defect this whole change exists to fix.
         with io.BytesIO(blob) as buf:
-            for record in strict_raw_records(buf, src_path, cap=_NOTIFICATION_RECORD_CAP):
-                _notification_key(record, src_path)
+            for record in facade.strict_raw_records(
+                buf, src_path, cap=facade._NOTIFICATION_RECORD_CAP
+            ):
+                facade._notification_key(record, src_path)
         with os.fdopen(os.open(dst_path, dst_flags, 0o666), "wb") as out:
             opened_dst = True
             with io.BytesIO(blob) as buf:
-                for record in strict_raw_records(buf, src_path, cap=_NOTIFICATION_RECORD_CAP):
+                for record in facade.strict_raw_records(
+                    buf, src_path, cap=facade._NOTIFICATION_RECORD_CAP
+                ):
                     out.write(record if record.endswith(_TERMINATORS) else record + b"\n")
                     written += 1
     except (OSError, UnreadableRecord) as exc:
@@ -977,6 +1015,7 @@ def _merge_named_stores(
     A manifest and its databases belong to one generation: filling missing files in an
     existing store can combine a V2 manifest with a V1 database that cannot open as V2.
     """
+    facade = _facade()
     with memory_store_namespace_lock(dst_root):
         platform_compat.make_owner_only_dir(dst_root)
         kept: list[str] = []
@@ -987,7 +1026,7 @@ def _merge_named_stores(
             if dst.exists():
                 kept.append(src.name)
                 continue
-            _copytree_safe(
+            facade._copytree_safe(
                 src,
                 dst,
                 allow_unpinned=allow_unpinned,

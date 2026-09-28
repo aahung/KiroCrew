@@ -5513,7 +5513,7 @@
       "new_sessions_start_with_this_agent": "新しいセッションはこのエージェントで始まります",
       "no_matches": "マッチするものがありません",
       "set_default_agent": "<agent/> を新しいセッションのデフォルトエージェントに設定",
-      "group_templates_hint": "共有テンプレートを共有メモリで実行します。クルーメイトとして登録されません。"
+      "group_templates_hint": "デフォルトのクルーメイトのワークスペースとメモリで実行します。新しいものは作成されません。"
     },
     "agentImportFlow": {
       "back": "戻る",
@@ -5649,6 +5649,7 @@
       "trust_desc": "このチャットでは、{{productName}} は最初に確認せずに機能します",
       "trust_label": "信頼",
       "chat_mode_hint": "チャットモード",
+      "trust_scope_tooltip": "このチャットはアプリの許可で信頼されています。許可は自動で期限切れになります。今すぐ終了するにはこのメニューで標準を選んでください。アプリ側でオフにするまで、アプリが再び許可することがあります。",
       "trust_tooltip": "このチャットでは、{{productName}} は最初に確認せずに機能します",
       "yolo_desc": "すべてのチャットで、{{productName}} は最初に確認せずに機能します",
       "yolo_expiration_timed": "{{duration}} 後に自動的にオフになり、その後再び確認します。",
@@ -5987,6 +5988,8 @@
       "show_pending_tool_call_in_chat": "チャットで保留中のツール呼び出しを表示",
       "skill": "スキル",
       "slash_commands": "スラッシュコマンド",
+      "spawn_awaiting_other": "サブエージェント {{count}} 件が実行の承認を待っています",
+      "spawn_pending_other": "サブエージェント {{count}} 件が待機中 — まず下のリクエストに応答してください",
       "steer": "指示を追加",
       "alt_action_hint_queues": "{{chord}} でこのメッセージをキューに入れる",
       "alt_action_hint_steers": "{{chord}} でこのメッセージで今すぐステアする",
@@ -6140,7 +6143,6 @@
       "settings_subtitle": "{{tab}} · {{detail}}"
     },
     "commentOverlay": {
-      "add_a_comment": "コメントを追加",
       "add_comment": "コメント追加",
       "add_instruction": "指示を追加",
       "additional_prompt": "追加プロンプト",
@@ -6570,6 +6572,7 @@
       "unknown_error": "インポートに失敗しました"
     },
     "instanceTabBar": {
+      "chain_via": "{{via}} › {{name}}",
       "connected": "接続済み",
       "connected_refresh": "接続済み · {{time}} に更新",
       "connected_refreshing": "接続済み · 更新中…",
@@ -6592,7 +6595,9 @@
       "unpin_crew": "{{name}} のピン留めを解除",
       "pinned_no_room": "ピン留め済み、ヘッダーに空きがありません",
       "keep_tab_order_fixed": "タブの順序を固定",
-      "instances_load_failed": "リモートクルーを読み込めませんでした。"
+      "instances_load_failed": "リモートクルーを読み込めませんでした。",
+      "unreachable": "到達不可",
+      "unreachable_via": "到達不可 — {{via}} が停止中"
     },
     "instancesViewport": {
       "connecting": "接続中…",
@@ -7595,11 +7600,12 @@
       "effort": "エフォート",
       "effort_help": "推論エフォートは、モデルが回答前に考える時間を設定します。高いほど難しい問題を長く推論するため遅くなりますが、回答品質が向上します。低いほど高速です。セッションごとの上書きをオフにすると、設定 → チャットのデフォルトへフォールバックします。デフォルトがなければモデル自身の選択を使用します（Fable/Opus/Sonnet のみ）。",
       "faster": "高速",
-      "configured_default_marker": "設定済みのデフォルト",
+      "configured_default_marker": "デフォルトのエフォート",
+      "slider_locked_hint": "デフォルトに固定されています。レベルを選ぶにはスイッチをオフにしてください。",
       "reasoning_effort": "推論エフォート",
       "smarter": "スマート",
-      "use_configured_default": "設定されたデフォルトを使用",
-      "use_model_default": "モデルのデフォルトを使用"
+      "use_configured_default": "デフォルトのエフォートを使用（{{level}}）",
+      "use_default_effort": "デフォルトのエフォートを使用"
     },
     "registryManager": {
       "add_an_org_registry_to_discover_team_specific_ap": "チームに固有のアプリを検出するために組織レジストリを追加",
@@ -7757,12 +7763,16 @@
     "selectionToolbar": {
       "ask": "これについて質問",
       "ask_hint": "選択部分を引用してサイドチャットを開きます — 送信するまで何も送られず、メインのチャットには影響しません",
+      "close_saving_continues": "閉じる – 保存は続行されます",
       "comment_input": "選択したテキストにコメント",
+      "comment_post_failed": "コメントを保存できませんでした。テキストはそのまま残っています。もう一度お試しください。",
+      "comment_post_failed_closed": "「{{quote}}」へのコメントは保存されませんでした。同じテキストをもう一度選択すると、下書きが戻り、再試行できます。",
       "copy": "コピー",
       "copy_failed": "コピーに失敗しました — ブラウザーがクリップボードへのアクセスをブロックしました。テキストを選択して手動でコピーしてください。",
       "copy_selection_hint": "選択したテキスト（コメントではなく）をクリップボードにコピーします",
       "more_actions": "選択範囲に対するその他の操作",
       "press_enter_to_comment": "Enter またはクリックでコメント…",
+      "saving": "保存中…",
       "tap_to_comment": "タップしてコメントを入力…",
       "quote": "引用",
       "quote_hint": "選択部分をこの会話の入力欄に引用します — 返信はメインのチャットに送られます"
@@ -9157,6 +9167,9 @@
     "notifications": "通知",
     "schedule": "スケジュール",
     "sessions": "セッション",
+    "search_short": "すべて検索",
+    "home": "ホーム",
+    "agent_capabilities_short": "機能",
     "settings": "設定",
     "task_runner": "Task Runner",
     "webhooks": "Webhooks",
@@ -10420,6 +10433,7 @@
         "copied": "コピーしました",
         "copy_failed": "コピーできませんでした",
         "steering": "追加しています…",
+        "delivery_pending": "送信確認待ち…",
         "redirecting_the_running_turn_not_yet_confirmed": "実行中のターンをリダイレクトしています — まだ確認されていません。",
         "turn_ended_before_this_applied_runs_as_its_own_message": "適用される前にターンが終了したため、別のメッセージとして実行されます。"
       },
@@ -10838,6 +10852,8 @@
       "mcp_session_started": "このセッションで起動済み",
       "message_queued_until_session_ready": "{{error}}。メッセージはキューに入り、セッションの準備ができ次第送信されます — ただしこのタブ内にのみ保持されるため、他のページに移動したり再読み込みすると再入力が必要になります。",
       "message_saved_as_draft": "{{error}}。メッセージは送信元のセッションで下書きとして保存されました。{{extra}}",
+      "more_actions": "その他の操作",
+      "update_entry_load_failed": "アップデート項目を読み込めませんでした。設定でアップデートを確認してください。",
       "no_results": "結果なし",
       "no_tools": "ツールなし",
       "open_activity_panel": "アクティビティパネルを開く",
@@ -10896,6 +10912,7 @@
       "send_failed_with_error": "送信に失敗しました: {{error}}",
       "send_failed_with_error_restored": "このメッセージを送信できませんでした: {{error}}。入力欄にテキストを戻しました。",
       "delivery_unconfirmed": "送信が確認できません — 入力欄にテキストを戻しました。再送信する前に会話履歴を確認してください。",
+      "delivery_unconfirmed_pending": "送信が確認できません — このメッセージはまだ確認待ちの可能性があります。返信が届かない場合は、もう一度送信してください。",
       "could_not_read_file_reason": "{{path}} を読み取れませんでした（{{reason}}）",
       "screenshot_failed_reason": "スクリーンショットに失敗しました：{{reason}}",
       "http_status": "HTTP {{status}}",
@@ -12711,10 +12728,17 @@
         "actions": "アクション",
         "add": "追加",
         "category": "カテゴリー",
-        "consolidated": "統合",
-        "consolidated_sessions_failed": "{{succeeded}}/{{total}} セッションを統合（{{failed}} 失敗）",
-        "consolidation_idle_hours": "統合アイドル（時間）",
-        "controls_how_conversation_history_is_consolidate": "会話履歴がメモリに統合される方法を制御します。",
+        "consolidated": "要約",
+        "consolidated_sessions_failed": "{{succeeded}}/{{total}} セッションを要約（{{failed}} 失敗）",
+        "consolidated_sessions_skipped_other": "{{succeeded}}/{{total}} セッションを要約 — プライベートセッション {{count}} 件をスキップ（{{modes}}）",
+        "consolidated_sessions_skipped_mode": "{{succeeded}}/{{total}} セッションを要約（{{skipped}} をスキップ：{{mode}}）",
+        "consolidate_failed_summary": "サーバーが要約リクエストを拒否し、その応答（サーバーはこの操作を「consolidation」と呼びます）は下に表示されています。他のセッションには影響ありません。再試行するには「今すぐ要約」を押してください。",
+        "consolidate_failed_session_other": "失敗したセッション {{count}} 件（最初: <session>{{session}}</session>）",
+        "consolidate_failed_reply": "サーバーの応答：<reply>{{reply}}</reply>",
+        "consolidate_list_failed": "要約するセッションの一覧を取得できませんでした",
+        "consolidate_list_failed_summary": "サーバーがセッション一覧のリクエストに応答しなかったため、何も要約されませんでした。再試行するには「今すぐ要約」を押してください。",
+        "consolidation_idle_hours": "アイドル後に要約（時間）",
+        "controls_how_conversation_history_is_consolidate": "会話履歴がメモリに要約される方法を制御します。",
         "daily_history": "日次履歴",
         "delete": "削除",
         "delete_failed": "レッスンを削除できませんでした",
@@ -12724,7 +12748,7 @@
         "delete_unusable_scope_title": "このレッスンをすべてのスコープで削除しますか？",
         "history_retention_days": "履歴保持（日数）",
         "knowledge": "ナレッジ",
-        "learned_user_preferences_coding_style_tools_work": "学習ユーザー優先設定（コーディングスタイル、ツール、ワークフロー）。メモリ統合により自動更新。",
+        "learned_user_preferences_coding_style_tools_work": "学習ユーザー優先設定（コーディングスタイル、ツール、ワークフロー）。セッションがメモリに要約されると自動更新。",
         "lesson_already_covered": "既存の学習内容ですでにカバーされています（{{reason}}）。新しい内容を追加するには、表現を変えてください。",
         "lesson_already_stored": "この学習内容はすでに保存されています。",
         "lesson_not_saved": "学習内容を保存できませんでした（{{reason}}）。編集してもう一度お試しください。",
@@ -12736,7 +12760,7 @@
         "no_history_yet": "履歴がまだありません",
         "no_lessons": "レッスンなし",
         "no_lessons_yet": "まだレッスンはありません",
-        "no_sessions_to_consolidate_start_a_chat_first": "統合するセッションがありません — まずチャットを開始してください",
+        "no_sessions_to_consolidate_start_a_chat_first": "要約するセッションがありません — まずチャットを開始してください",
         "persistent_lessons_injected_into_every_session_a": "すべてのセッションに注入される永続的なレッスン。Task Runnerの失敗から自動抽出されます。'kirocrew learn add' を使って手動で追加できます。ベクトルメモリがアクティブな場合、レッスンはセマンティックタブで lesson.* エントリとして管理されます。",
         "preference": "優先度",
         "preferences": "優先度",
@@ -12753,6 +12777,16 @@
         "scope_workspace": "ワークスペース {{name}}",
         "semantic_memory_active_text_files_are_read_only": "セマンティックメモリがアクティブ — テキストファイルは読み取り専用です",
         "session_other": "{{count}} セッション",
+        "skipped_incognito_session_other": "シークレットセッション",
+        "skipped_sessions_other": "プライベートセッション {{count}} 件をスキップ（{{modes}}）",
+        "skipped_sessions_mode": "{{skipped}} をスキップ：{{mode}}",
+        "skipped_temporary_count_other": "一時 {{count}} 件",
+        "skipped_incognito_count_other": "シークレット {{count}} 件",
+        "skipped_modes_breakdown": "{{temporary}}、{{incognito}}",
+        "skipped_modes_unknown": "一時またはシークレット",
+        "skipped_modes_help": "一時的は空の状態で始まり、何も保存しません。シークレットは既知の情報を使いますが、新しいメモリは保存しません。",
+        "skipped_temporary_session_other": "一時セッション",
+        "summarize_now_help": "「今すぐ要約」は会話に含まれる事実・決定・学びをメモリに書き込みます。会話そのものには手を加えません。",
         "summarize_now": "今すぐ要約",
         "tool": "ツール",
         "when": "時間"
@@ -12948,7 +12982,8 @@
         "update": "更新",
         "validation_findings": "検証結果",
         "version_range": "(v{{from}} → v{{to}})",
-        "workspace": "ワークスペース"
+        "workspace": "ワークスペース",
+        "detail_unreadable": "この候補のファイルは安全に読み取れないため、レビューできません。却下するとキューから削除されます。"
       },
       "steeringTab": {
         "always_on_markdown_conventions_injected_into_eve": "エージェントが読む Markdown 規約。適用タイミングは各ファイルのインクルードモードで決まります: 常時、一致するファイルのときだけ、または必要時。グローバルファイルは ~/.kiro/steering にあり、どこでも適用されます。ワークスペースファイルは <project>/.kiro/steering にあり、そのプロジェクトだけに適用されます。",
@@ -15797,7 +15832,9 @@
         "up_to_warm": "Up to {{n}} stay warm at once",
         "use_my_edits_anyway": "現在の状態のクルーに自分の編集を適用する",
         "your_code": "Your code: {{code}}",
-        "your_crews": "あなたのクルー"
+        "your_crews": "あなたのクルー",
+        "reported_host": "{{host}}（申告値）",
+        "reported_host_hint": "この crew はこのマシン上にあると申告しています。このダッシュボードには経路がなく、接続は仲介する crew を経由します。"
       },
       "webhooksPanel": {
         "inbound_webhooks": "受信 Webhooks",

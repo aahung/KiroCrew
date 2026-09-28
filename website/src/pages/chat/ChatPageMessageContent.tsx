@@ -27,6 +27,10 @@ import type { ChatMessage, McpServer } from '../../types'
 import {
   buildFileLabels,
   findUnreferencedAttachments,
+  leadingMentionBoundary,
+  MENTION_LINE_SUFFIX,
+  mentionBoundary,
+  mentionTokenRegex,
   parseDirs,
   parseFiles,
   resolveDirSegment,
@@ -36,10 +40,17 @@ import {
 import { findTokenRanges, recollapsePastes, type PasteBlock } from '../../utils/pasteTokens'
 import McpToolsPanel from './McpToolsPanel'
 
-export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode, sidebarOnScreen }: {
-  activeSlot: string | null; agent?: string; onReveal?: () => void; onRename?: () => void; mode?: string
+export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, onAutoTitle, mode, sidebarOnScreen, omitPopout, triggerLabel }: {
+  activeSlot: string | null; agent?: string; onReveal?: () => void; onRename?: () => void; onAutoTitle?: () => void; mode?: string
   /** Whether the sidebar (and its folder-order banner) is on screen -- see SessionActionsMenu. */
   sidebarOnScreen?: boolean
+  /** See SessionActionsMenu: the phone bar's ⋯ menu owns the pop-out rows. */
+  omitPopout?: boolean
+  /** Phone single top bar: render the session TITLE inside the trigger, ahead of
+   *  the chevron, so title and menu are one control (one tap target, chevron
+   *  flush after the last character). Absent, the trigger is the bare chevron
+   *  the desktop title row places beside its own rename control. */
+  triggerLabel?: React.ReactNode
 }) {
   // Controlled open state: lets the colour-swatch row (not a Radix menu item)
   // close the menu after a pick, via the onColorPicked hook passed below.
@@ -89,9 +100,20 @@ export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode, si
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <button className="px-0.5 py-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none transition-all" aria-label={i18nT('pages.chatPage.session_options')}>
-          <ChevronDown size={14} />
-        </button>
+        {triggerLabel !== undefined ? (
+          /* No aria-label here: the visible title IS the accessible name, and the
+             menu's role is appended as sr-only text -- an aria-label would replace
+             the title, which on the phone this trigger is the only copy of. */
+          <button data-testid="session-title-menu" className="flex min-w-0 items-center gap-1 px-1 py-1 rounded-md text-text-strong cursor-pointer bg-transparent border-none transition-colors hover:bg-bg-hover" aria-haspopup="menu">
+            <span className="session-header-title text-[15px] font-semibold truncate min-w-0">{triggerLabel}</span>
+            <span className="sr-only">, {i18nT('pages.chatPage.session_options')}</span>
+            <ChevronDown size={16} className="shrink-0 text-muted" />
+          </button>
+        ) : (
+          <button className="px-0.5 py-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none transition-all" aria-label={i18nT('pages.chatPage.session_options')}>
+            <ChevronDown size={14} />
+          </button>
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-[180px]">
         {activeSlot && (
@@ -100,6 +122,7 @@ export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode, si
           slotKey={activeSlot}
           mode={mode}
           sidebarOnScreen={sidebarOnScreen}
+          omitPopout={omitPopout}
           // MCP servers: stateful (lazy fetch gated on the sub's open state), so
           // it stays here as an info slot rather than a generic capability.
           infoSlots={[
@@ -127,6 +150,7 @@ export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, mode, si
             </DropdownMenuSub>,
           ]}
           onReveal={onReveal}
+          onAutoTitle={onAutoTitle}
           onRename={onRename}
           // The header controls its own menu, so close it after a colour pick.
           onColorPicked={() => setOpen(false)}
@@ -364,10 +388,13 @@ function renderUserContentInner(opts: UserContentRenderOpts) {
 
 /** Boundary-checked presence of an `@token` in a text segment — the same rule
  *  the split regex uses, so a key is only offered to a segment that can
- *  actually match it. */
+ *  actually match it. The SHARED matcher, not a local pattern: the send path
+ *  widened to the leadingMentionBoundary/mentionBoundary contract, and a
+ *  renderer still splitting on whitespace-only turned every punctuated or
+ *  wrapped mention's attachment invisible — no chip AND no card, where base
+ *  drew a card (fork Opus review). */
 function tokenPresent(text: string, token: string): boolean {
-  const esc = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(^|\\s)@${esc}(?=\\s|$)`).test(text)
+  return mentionTokenRegex(token).test(text)
 }
 
 /** Inline chip for a folder reference in a sent message. Clicking opens the
@@ -454,22 +481,26 @@ function renderInlineSegment(content: string, meta: Record<string, unknown> | un
 
   // Folder tokens join the same split as file mentions. A dir key always ends
   // in `/` and a file key never does, so classification below is unambiguous.
-  const keys = [...[...mentionMap.keys()].slice(0, 20), ...dirKeys]
+  // Longest-first so a staged `report,` is tried before `report` at the same
+  // position (ordered alternation); the shared boundary pair keeps the drawing
+  // in lockstep with the send path and findUnreferencedAttachments' decision.
+  const keys = [...[...mentionMap.keys()].slice(0, 20), ...dirKeys].sort((a, b) => b.length - a.length)
   const tokPattern = keys.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
   const parts = tokPattern
-    ? display.split(new RegExp(`(@(?:${tokPattern}))(?=\\s|$)`, 'g'))
+    ? display.split(mentionSplitRe(tokPattern))
     : [display]
   return (
     <span key={keyBase} style={{ whiteSpace: 'pre-wrap' }}>
       {parts.map((part, i) => {
-        const tok = part.match(/^@(.+)$/)?.[1]
+        const hit = mentionPart(part, key => mentionMap.has(key) || !!dirMap?.has(key))
+        const tok = hit?.key
         const dirPath = tok && dirMap?.get(tok)
         if (dirPath) {
           return <DirChip key={`${keyBase}-d${i}`} label={tok} fullPath={dirPath} onOpen={onFolderOpen} />
         }
         const fullPath = tok && mentionMap.get(tok)
-        if (fullPath) {
-          return <FileMentionChip key={`${keyBase}-f${i}`} label={tok} fullPath={fullPath} onOpen={onFileOpen} />
+        if (hit && fullPath) {
+          return <FileMentionChip key={`${keyBase}-f${i}`} label={hit.label} fullPath={fullPath} onOpen={onFileOpen} />
         }
         return <span key={`${keyBase}-p${i}`}>{part}</span>
       })}
@@ -485,6 +516,27 @@ function renderInlineSegment(content: string, meta: Record<string, unknown> | un
  *  viewer); without one — a host that has no file viewer, such as a split
  *  pane or a member DM — it is an inert span, the same degrade DirChip makes,
  *  so a chip never LOOKS clickable on a surface where clicking does nothing. */
+/** The transcript's mention split. A `:line` suffix rides INSIDE its pill
+ *  (fork UX review): `(@src/main.ts:42)` draws `(` + pill `@src/main.ts:42` +
+ *  `)`, one reference as the user typed it, instead of stranding `:42` as
+ *  text beside the pill. The suffix grammar is the shared MENTION_LINE_SUFFIX
+ *  (anchored for its exec() consumers, so the `^` is sliced off here), and
+ *  the trailing boundary is the same one send serialization uses. */
+function mentionSplitRe(tokPattern: string): RegExp {
+  return new RegExp(`(${leadingMentionBoundary})(@(?:${tokPattern})(?:${MENTION_LINE_SUFFIX.source.slice(1)})?)(?=${mentionBoundary})`, 'g')
+}
+
+/** Resolve one split part to its map key and the label to draw: `@tok`, or
+ *  `@tok:42` whose key is `tok`. A key that itself ends in `:digits` is
+ *  tried whole first, so it is never cut. */
+function mentionPart(part: string, known: (key: string) => boolean): { key: string; label: string } | null {
+  const whole = part.match(/^@(.+)$/)?.[1]
+  if (!whole) return null
+  if (known(whole)) return { key: whole, label: whole }
+  const split = whole.match(/^(.+)(:\d+)$/)
+  return split && known(split[1]) ? { key: split[1], label: whole } : null
+}
+
 function FileMentionChip({ label, fullPath, onOpen }: { label: string; fullPath: string; onOpen?: (path: string) => void }) {
   const base = 'inline-flex items-center px-1.5 py-0.5 mx-0.5 rounded bg-accent/15 text-accent text-[12px] font-mono'
   if (!onOpen) {
@@ -616,20 +668,21 @@ function renderFileSegment(opts: FileSegmentOpts) {
   // Cap tokens to prevent ReDoS from many alternations. Folder tokens join
   // the same split; a dir key always ends in `/` and a file key never does,
   // so classification below is unambiguous.
-  const keys = [...[...mentionMap.keys()].slice(0, 20), ...dirKeys]
+  const keys = [...[...mentionMap.keys()].slice(0, 20), ...dirKeys].sort((a, b) => b.length - a.length)
   const tokPattern = keys.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
-  const parts = display.split(new RegExp(`(@(?:${tokPattern}))(?=\\s|$)`, 'g'))
+  const parts = display.split(mentionSplitRe(tokPattern))
   const body = (
     <span key={`${keyBase}-body`} style={{ whiteSpace: 'pre-wrap' }}>
       {parts.map((part, i) => {
-        const tok = part.match(/^@(.+)$/)?.[1]
+        const hit = mentionPart(part, key => mentionMap.has(key) || !!dirMap?.has(key))
+        const tok = hit?.key
         const dirPath = tok && dirMap?.get(tok)
         if (dirPath) {
           return <DirChip key={`${keyBase}-d${i}`} label={tok} fullPath={dirPath} onOpen={onFolderOpen} />
         }
         const fullPath = tok && mentionMap.get(tok)
-        if (fullPath) {
-          return <FileMentionChip key={`${keyBase}-f${i}`} label={tok} fullPath={fullPath} onOpen={onFileOpen} />
+        if (hit && fullPath) {
+          return <FileMentionChip key={`${keyBase}-f${i}`} label={hit.label} fullPath={fullPath} onOpen={onFileOpen} />
         }
         return part ? <span key={`${keyBase}-p${i}`}>{part}</span> : null
       })}

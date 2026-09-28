@@ -1088,7 +1088,18 @@ collision behaviour was not probed. The entries moved are the
 already projected ones (credential fields withheld, `autoApprove` dropped,
 `KIROCREW_PORT` / `KIROCREW_SESSION_KEY` applied), converted with
 `session_mcp.acp_server_element`; no spec is re-read and the derived-spec
-snapshot is unchanged. The move is bounded: only managed names, only the active
+snapshot is unchanged. Each hoisted entry also receives this session's
+`KIROCREW_STUB_SESSION_TOKEN`: the runtime stamps the token onto the
+session-level array before the hoist runs, so without it the hoisted
+`kirocrew-core` would be the one managed server launched unattested and refuse
+every call as `identity_unattested`. Caller entries keep their own identity and
+third-party servers never receive the token. A tokened entry launches the
+managed invocation (`agent.managed_mcp_spec_entry(name, include_opt_in=True)`),
+never the spec's `command` / `args`: KAS spawns it directly, so
+`gatewayd._spawns_own_control_plane` never vets it, and a hand-edited spec
+must not hand the token to another binary. Its env keeps only the projected
+`KIROCREW_PORT` / `KIROCREW_SESSION_KEY` plus the managed env; a name whose
+managed invocation does not resolve is hoisted as projected with no token. The move is bounded: only managed names, only the active
 agent, never a name the caller's array already carries (a broker stub or the
 member dispatch entry stays authoritative and a name appears once), and only a
 stdio entry whose keys are drawn only from `command`, `args`, `env`, `type` — a
@@ -2231,6 +2242,93 @@ tree by awaiting `process.wait()` for the same reason the real
 `terminate_windows_asyncio_tree` does — that await is what populates `returncode`,
 so a double returning without it would report the placeholder on Windows and hide
 the amendment behind its own unfaithfulness.
+
+**An exit the reader OBSERVES retires the registry entries too, once it is
+confirmed.** `_kill_inner` drops the root's `kiro_pids.txt` /
+`kiro_session_pids.txt` lines after its own reap. A root killed from outside — an
+OOM kill, a `pkill`, an operator — reaches no kill: the reader loop hits EOF,
+`_mark_dead` unshields the pid in memory, and the two lines used to stand until
+the periodic sweep's next tick, bounded only by
+`SessionCleanup.MAX_TICK_INTERVAL_SECS` (measured on the nightly leak gate: a
+SIGKILLed background runtime stayed tracked for 293s). Both observed-EOF returns
+of the reader — the empty read, and `IncompleteReadError` while draining an
+oversize line — now call `_retire_tracking_after_exit`, which waits for the exit
+under the kill path's `_KILL_REAP_TIMEOUT`, amends the death summary with the
+measured code (logged as `reaped after an observed exit`, a literal template
+distinct from the kill path's `reaped after kill`, because a log line that says
+"killed" must name who killed), re-probes `pid_exists`, and retires the ROOT's
+lines off the loop (`asyncio.to_thread`, since the untrack takes the file locks
+the sweep contends for). The write is bound to the PROCESS, not the number: the
+reader has no process left to re-check, and the freed number can be handed to a
+replacement root this gateway just tracked before the write lands, so
+`session_pid._untrack_root_by_identity(pid, start_token)` removes, under the
+session file's lock, only the line equal to `<gw>:<pid>:<start_token>` where the
+token is the one `AcpRuntime` read at spawn (`_spawn_start_token`); a different
+or absent token, or no token to compare, touches nothing. The bare
+`kiro_pids.txt` line carries no identity, and a successor handed the number may
+have no session line of its own yet (its spawn has appended the bare line and not
+reached the session write), so the session file cannot say whether the number has
+a new holder — the kernel can: `_untrack_pid_if_dead` probes `pid_exists` INSIDE
+`_pid_file_lock`, the lock `_track_pid` appends under, and removes the bare line
+only when the number is dead at that moment. A live holder keeps it: it cannot be
+mid-append while the probe holds the lock, so its bare line is either already
+there or is the one its own `_track_pid` writes next, and the sweep prunes any
+dead bare line within its tick. `pid_exists` treats EPERM as alive. The two
+per-file locks are taken in turn, never nested, and no lock spans the pair. The
+call reports whether every write it owed committed — a refused `kiro_pids.txt`
+rewrite is reported as `False`, not as a clean retirement. Every other doubt
+retains too: a closed stdout is not an exit (a backend can close its pipe and
+keep running), a wait that times out or a pid that still answers keeps the lines,
+and an untrack that raises is logged at debug like the kill path's. Descendant
+lines are deliberately left alone — a child that outlived the root is reparented
+and still running, and its own `kiro_pids.txt` line is what the sweep reaps it
+by. Pinned by `test_observed_exit_retires_registry_entries_once_reaped`,
+`test_observed_exit_keeps_tracking_while_the_root_still_runs` and
+`test_eof_inside_an_oversize_line_retires_the_same_way` in
+`test/test_acp_runtime.py`, and by the `_untrack_root_by_identity` cases in
+`test/test_pid_lifecycle.py`.
+
+**Every writer of a root's registry lines is bound to the identity read at
+spawn.** Both spawn paths (`AcpRuntime._spawn_admitted`, `AcpClient._spawn`) read
+`_pid_start_token` ONCE, keep it as `_spawn_start_token`, and hand it to
+`_track_session_pid(pid, start_token)`, so the line written and the line later
+compared are one read of the identity rather than two — two probes of one number
+are two reads that can disagree once the number changes hands. `_track_session_pid`
+keeps ONE line per `gw:pid` number: the exact entry already present is a re-track
+and is left alone; a line under the same number carrying a DIFFERENT token is a
+predecessor's — the caller is recording the process that holds the number NOW, so
+whatever that line named has exited — and it is REPLACED rather than kept (a kept
+stale line is the hole identity-bound retirement fell through: the successor never
+got a line, so nothing about it was ever in the file); a token-less write never
+replaces a tokened line, since it has no identity to offer; a refused replacement
+raises, like a refused append, because a live root recorded nowhere is the one
+unrecoverable direction. The kill paths retire by identity too: `_kill_inner` and
+`AcpClient._reset_state` call `_untrack_root_by_identity(pid, _spawn_start_token)`
+after their reap — "confirmed dead" is a fact about the process, not about its
+number, which a root spawned since can already hold, and the prefix-matched
+untrack they used before took the successor's lines with it. When identity
+retirement finds no line of ours (spawn's append failed, or a successor already
+replaced it) the bare line goes through `_untrack_pid_if_dead`, never by number
+alone; a root whose identity could not be read at spawn has no token to compare
+and keeps the prefix-matched untrack it always had. Before replacing another
+line, `_track_session_pid` re-reads the number's identity under the lock and
+writes only while it still names the process the token belongs to: a LATE tracker
+— one running after its own root died and the number was handed on — would
+otherwise take the live successor's only record for a stale predecessor's; the
+re-read is an occupancy check, never the source of what is written. `AcpRuntime`
+now runs its tracking pair off the loop in one executor hop, as `AcpClient._spawn`
+does: each tracker takes an exclusive file lock and, on a recycled number, now
+rewrites the file under it. The hop is an await between the method's two reap
+guards, so its own guard first WAITS for the worker (an append landing after the
+reap has untracked the pid would resurrect a line for a dead, recyclable number),
+then reaps, then lets the cancellation through — and both steps run as one task
+the guard only waits on behind `asyncio.shield`, absorbing a repeated `cancel()`
+(a newer slot signal, then a slot deletion, both target the same eager-spawn task)
+until the reap has settled, so being cancelled twice cannot skip it. Pinned by the `_track_session_pid` cases and
+`test_reset_state_retires_by_identity_when_a_spawn_token_is_held` in
+`test/test_pid_lifecycle.py`, `TestAcpRuntimePidTracking` in
+`test/test_acp_runtime.py`, and `TestRuntimeRootTrackingOffLoop` in
+`test/test_acp_spawn_offload.py`.
 
 ### Codex MCP result envelopes
 

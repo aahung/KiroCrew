@@ -94,6 +94,7 @@ from kiro_crew.mcp_core import (
     require_strict_session_key,
 )
 from kiro_crew.mcp_shared import call_tool_with_logging, run_mcp_stdio_loop
+from kiro_crew.mcp_tool_titles import with_titles
 from kiro_crew.platform import redact_via_context as redact
 from kiro_crew.validation import (
     CHAT_FOLDER_CREATE_SCHEMA,
@@ -114,6 +115,7 @@ from kiro_crew.validation import (
     SESSION_READ_MESSAGE_SCHEMA,
     SESSION_RELEASE_SCHEMA,
     SESSION_SEND_SCHEMA,
+    SESSION_SET_MODEL_SCHEMA,
     SESSION_STOP_SCHEMA,
     validate_tool_args,
 )
@@ -133,6 +135,7 @@ SESSION_CONTROL_TOOLS: tuple[str, ...] = (
     "session_create",
     "session_fork",
     "session_stop",
+    "session_set_model",
     "session_close",
     "session_send",
     "session_adopt",
@@ -606,6 +609,37 @@ def _tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "session_set_model",
+            "description": (
+                "Change the model another session runs on. Only an IDLE session takes "
+                "the change: if the target has a turn or sub-agents in flight the call "
+                "fails with 'session busy, model not changed' and nothing changes. To "
+                "force it, stop the target with session_stop first, then retry. The "
+                "model is applied when the target's next turn starts, after the same "
+                "permission check runs again; if the target has become channel-linked "
+                "or otherwise out of reach by then, the change is dropped. The "
+                "conversation is kept. 'auto', 'Auto (Jev)' and sessions bound to a "
+                "remote crew are refused."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Session key from list_sessions, or its exact title.",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": (
+                            "Model to switch to: a canonical key or provider id, e.g. "
+                            "'sonnet' or 'opus'. 'auto' is owner-only."
+                        ),
+                    },
+                },
+                "required": ["target", "model"],
+            },
+        },
+        {
             "name": "session_close",
             "description": (
                 "Close another session — the same thing as pressing the ✕ on that tab. "
@@ -770,7 +804,7 @@ def _list_tools() -> list[dict[str, Any]]:
     Reaching this process at all means an agent spec referenced this server, so
     the assignment already happened; there is nothing left to gate here.
     """
-    return _tool_definitions()
+    return with_titles(SERVER_NAME, _tool_definitions())
 
 
 def _get_rows(path: str) -> tuple[list[dict], str | None]:
@@ -1903,6 +1937,19 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             return f"\u2139\ufe0f `{target}`: {info} — nothing to stop."
         return f"\U0001f6d1 Stop sent to `{target}`. Its transcript now shows the stop card."
 
+    if name == "session_set_model":
+        args = validate_tool_args(args, SESSION_SET_MODEL_SCHEMA)
+        resp = _post(
+            "/api/session-control/set-model",
+            {"target": args["target"], "model": args["model"]},
+            session_key=caller_key,
+        )
+        if resp.get("error"):
+            return f"Error: could not change that session's model: {resp['error']}"
+        target = resp.get("target", args["target"])
+        model = resp.get("model") or "auto"
+        return redact(f"\U0001f501 `{target}` will switch to `{model}` when its next turn starts.")
+
     if name == "session_close":
         args = validate_tool_args(args, SESSION_CLOSE_SCHEMA)
         resp = _post(
@@ -2003,6 +2050,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         queued = resp.get("queue_depth", 0)
         if queued:
             state_line += f", {queued} message(s) queued"
+        if resp.get("model"):
+            state_line += f", model {redact(str(resp['model']))}"
+        if resp.get("pending_model"):
+            state_line += f", pending model {redact(str(resp['pending_model']))} for its next turn"
         head_line = (
             f"\U0001f4d6 `{resp.get('target', '')}` — {resp.get('title', '')} "
             f"({state_line}; total={resp.get('total', 0)})"

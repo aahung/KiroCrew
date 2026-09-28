@@ -1729,6 +1729,7 @@
       "reads_desc": "{{productName}} runs read-only shell commands on its own, but asks for everything else",
       "trust_label": "Trust",
       "chat_mode_hint": "chat mode",
+      "trust_scope_tooltip": "Trusted by an app grant for this chat; it expires on its own. Pick Normal in this menu to end it now; the app may grant it again until you turn it off in that app.",
       "trust_tooltip": "In this chat, {{productName}} works without asking you first",
       "trust_desc": "In this chat, {{productName}} works without asking you first",
       "yolo_label": "YOLO",
@@ -2808,11 +2809,15 @@
       "show": "Show"
     },
     "selectionToolbar": {
+      "close_saving_continues": "Close — saving continues",
       "comment_input": "Comment on the selected text",
+      "comment_post_failed": "Couldn’t save your comment. Your text is still here — try again.",
+      "comment_post_failed_closed": "Your comment on “{{quote}}” wasn’t saved. Select that text again to pick it up and try again.",
       "copy_failed": "Copy failed — your browser blocked clipboard access. Select the text and copy it yourself.",
       "copy_selection_hint": "Copies the selected text — not your comment — to the clipboard",
       "more_actions": "More actions for the selection",
       "press_enter_to_comment": "Press Enter or click to comment…",
+      "saving": "Saving…",
       "tap_to_comment": "Tap to write a comment…"
     },
     "sessionActionsMenu": {
@@ -3082,7 +3087,7 @@
       "manage_agents": "Manage agents…",
       "new_sessions_start_with_this_agent": "New sessions start with this agent",
       "set_default_agent": "Set <agent/> as default agent for new sessions",
-      "group_templates_hint": "Runs the shared template on shared memory; nothing is enrolled as a crewmate."
+      "group_templates_hint": "Runs on your default crewmate's workspace and memory — nothing new is created."
     },
     "agentSkillsEditor": {
       "edit_agent_config_to_change_mapping": "{{path}} — edit the agent config file to change this mapping",
@@ -3110,7 +3115,8 @@
       "comment_unread_other": "{{count}} comments · unread"
     },
     "reasoningEffortDropdown": {
-      "configured_default_marker": "Configured default",
+      "configured_default_marker": "Default effort",
+      "slider_locked_hint": "Locked to the default. Turn the switch off to pick a level.",
       "default_with_level": "Default · {{level}}",
       "effort_help": "Reasoning effort sets how long the model thinks before answering. Higher means more time reasoning through hard problems (slower, better answers); lower is faster. Turning off the per-session override falls back to the default in Settings → Chat, or to the model's own choice when no default is set (Fable/Opus/Sonnet only)."
     },
@@ -3653,6 +3659,9 @@
     "notifications": "Notifications",
     "schedule": "Schedule",
     "sessions": "Sessions",
+    "search_short": "Search all",
+    "home": "Home",
+    "agent_capabilities_short": "Capabilities",
     "settings": "Settings",
     "task_runner": "Task Runner",
     "webhooks": "Webhooks",
@@ -4374,6 +4383,7 @@
         "copy_failed": "Copy failed",
         "redirecting_the_running_turn_not_yet_confirmed": "Redirecting the running turn — not yet confirmed.",
         "steering": "Steering…",
+        "delivery_pending": "Delivery pending…",
         "turn_ended_before_this_applied_runs_as_its_own_message": "Turn ended before this applied — runs as its own message."
       },
       "earlierMessagesBar": {
@@ -4620,6 +4630,8 @@
       "mcp_session_started": "Started in this session",
       "message_queued_until_session_ready": "{{error}}. Your message is queued and will be sent when a session is ready — but it is held in this tab only, so if you navigate away or reload you will need to retype it.",
       "message_saved_as_draft": "{{error}}. Your message is saved as a draft in the session you sent it from.{{extra}}",
+      "more_actions": "More actions",
+      "update_entry_load_failed": "Couldn't load the update entry. Check for updates in Settings.",
       "no_results": "No results",
       "no_tools": "No tools",
       "open_activity_panel": "Open activity panel",
@@ -4650,6 +4662,7 @@
       "send_failed_with_error": "Send failed: {{error}}",
       "send_failed_with_error_restored": "Couldn't send this message: {{error}}. Your text is back in the composer.",
       "delivery_unconfirmed": "Delivery not confirmed — your text is back in the composer; check the conversation above before sending it again.",
+      "delivery_unconfirmed_pending": "Delivery not confirmed — this message may still be pending. If no reply arrives, send it again.",
       "could_not_read_file_reason": "Could not read {{path}} ({{reason}})",
       "screenshot_failed_reason": "Screenshot failed: {{reason}}",
       "http_status": "HTTP {{status}}",
@@ -5573,14 +5586,38 @@
         "group_semantic_count": "Semantic ({{count}})"
       },
       "memoryTab": {
-        "consolidated_sessions_failed": "Consolidated {{succeeded}}/{{total}} sessions ({{failed}} failed)",
-        "controls_how_conversation_history_is_consolidate": "Controls how conversation history is consolidated into memory.",
-        "learned_user_preferences_coding_style_tools_work": "Learned user preferences (coding style, tools, workflows). Auto-updated by memory consolidation.",
+        "consolidated_sessions_failed": "Summarized {{succeeded}}/{{total}} sessions ({{failed}} failed)",
+        "consolidated_sessions_skipped_one": "Summarized {{succeeded}}/{{total}} sessions — {{count}} private session skipped ({{modes}})",
+        "consolidated_sessions_skipped_other": "Summarized {{succeeded}}/{{total}} sessions — {{count}} private sessions skipped ({{modes}})",
+        "consolidated_sessions_skipped_mode": "Summarized {{succeeded}}/{{total}} sessions ({{skipped}} skipped: {{mode}})",
+        "consolidate_failed_summary": "The server rejected a summarize request — its reply, which calls this operation \"consolidation\", is shown below; the other sessions were not affected. Press Summarize now to retry.",
+        "consolidate_failed_session_one": "{{count}} failed session: <session>{{session}}</session>",
+        "consolidate_failed_session_other": "{{count}} failed sessions, the first: <session>{{session}}</session>",
+        "consolidate_failed_reply": "Server's reply: <reply>{{reply}}</reply>",
+        "consolidate_list_failed": "Could not list the sessions to summarize",
+        "consolidate_list_failed_summary": "The server did not answer the request for the list of sessions, so nothing was summarized. Press Summarize now to retry.",
+        "controls_how_conversation_history_is_consolidate": "Controls how conversation history is summarized into memory.",
+        "learned_user_preferences_coding_style_tools_work": "Learned user preferences (coding style, tools, workflows). Updated automatically when sessions are summarized into memory.",
         "lesson_already_covered": "An existing lesson already covers this ({{reason}}). Reword it to add something new.",
         "lesson_already_stored": "This lesson is already stored.",
         "lesson_not_saved": "Lesson not saved ({{reason}}). Edit it and try again.",
         "persistent_lessons_injected_into_every_session_a": "Persistent lessons injected into every session. Auto-extracted from task runner failures. Add manually via 'kirocrew learn add'. When vector memory is active, lessons are managed in the Semantic tab as lesson.* entries.",
-        "save": "Save"
+        "save": "Save",
+        "skipped_incognito_session_one": "incognito session",
+        "skipped_incognito_session_other": "incognito sessions",
+        "skipped_sessions_one": "{{count}} private session skipped ({{modes}})",
+        "skipped_sessions_other": "{{count}} private sessions skipped ({{modes}})",
+        "skipped_sessions_mode": "{{skipped}} skipped: {{mode}}",
+        "skipped_temporary_count_one": "{{count}} temporary",
+        "skipped_temporary_count_other": "{{count}} temporary",
+        "skipped_incognito_count_one": "{{count}} incognito",
+        "skipped_incognito_count_other": "{{count}} incognito",
+        "skipped_modes_breakdown": "{{temporary}}, {{incognito}}",
+        "skipped_modes_unknown": "temporary or incognito",
+        "skipped_modes_help": "Temporary starts blank and saves no new memory. Incognito uses what it knows but saves no new memory.",
+        "skipped_temporary_session_one": "temporary session",
+        "skipped_temporary_session_other": "temporary sessions",
+        "summarize_now_help": "Summarize now writes the facts, decisions and lessons from your conversations into memory; the conversations themselves stay untouched."
       },
       "promptsTab": {
         "failed_to_load_prompts": "Failed to load prompts",
@@ -5661,7 +5698,8 @@
         "update": "Update",
         "validation_findings": "Validation findings",
         "version_range": "(v{{from}} → v{{to}})",
-        "workspace": "workspace"
+        "workspace": "workspace",
+        "detail_unreadable": "This candidate's files can't be read safely, so review is unavailable. Dismiss it to remove it from the queue."
       },
       "steeringTab": {
         "delete_confirm": "Delete “{{path}}”?",

@@ -103,8 +103,7 @@
     "session_send": "Send to session",
     "session_adopt": "Adopt session",
     "session_release": "Release session",
-    "session_read_message": "Read session message",
-    "session_set_model": "Set session model"
+    "session_read_message": "Read session message"
   },
   "kirocrew-cron": {
     "cron_list": "List schedules",

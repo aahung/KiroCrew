@@ -97,7 +97,12 @@ from kiro_crew.acp.liveness import (
     consult_offloaded,
     steady_now,
 )
-from kiro_crew.acp.mcp_session_report import KasMcpReadiness, McpSessionReport
+from kiro_crew.acp.mcp_session_report import (
+    BUCKET_CAP,
+    NAME_CAP,
+    KasMcpReadiness,
+    McpSessionReport,
+)
 from kiro_crew.acp.prompt_blocks import build_prompt_blocks, summarize_prompt_structure
 from kiro_crew.acp.types import (
     ACP_BACKEND_KAS,
@@ -129,6 +134,7 @@ from kiro_crew.acp.types import (
     JSONRPC_METHOD_NOT_FOUND,
     METHOD_CANCEL,
     METHOD_COMMANDS_EXECUTE,
+    METHOD_KAS_MCP_STATUS,
     METHOD_PROMPT,
     METHOD_REQUEST_PERMISSION,
     METHOD_SET_CONFIG_OPTION,
@@ -845,6 +851,8 @@ class AcpRuntimeProtocol(Protocol):
 
     def mark_turn_active(self, session_id: str, active: bool) -> None: ...
 
+    def begin_mcp_sign_in(self, session_id: str, server_name: str) -> bool: ...
+
     def unregister_session(self, session_id: str) -> None: ...
 
     async def terminate_session(self, session_id: str) -> None: ...
@@ -1101,6 +1109,15 @@ class AcpSessionHandle:
         # OAuth requests collected by drain_init(). Dashboard startup drains
         # this list through AcpSessionProvider after create_session returns.
         self._pending_oauth_requests: list[dict[str, str]] = []
+        # Servers whose last ``_kiro/mcp/status`` entry for this session was an
+        # authorization failure and that have not connected since. Kept across a
+        # timed-out sign-in, whose entry reports ``failedAuthorization`` false,
+        # so the next turn offers the sign-in again.
+        self._mcp_sign_in_needed: set[str] = set()
+        # True while session start drains its frames (the managed-readiness
+        # barrier or the init drain): a start that fails there is torn down, so
+        # it must not have started a sign-in first.
+        self._mcp_sign_in_deferred = False
         # What THIS session's MCP servers reported at init — parity with
         # AcpClient._mcp_report. On the shared runtime the frames are staged
         # per sessionId before this handle's queue exists, so the report is
@@ -1688,6 +1705,8 @@ class AcpSessionHandle:
             # failure so a dead write cannot leave the session permanently
             # routed-to.
             _method, _params = await build_request()
+            # A sign-in whose link lapsed unused is offered again with the turn.
+            self._offer_mcp_sign_in()
             _mark = getattr(self._runtime, "mark_turn_active", None)
             if _mark is not None:
                 _mark(self._session_id, True)
@@ -4000,6 +4019,8 @@ class AcpSessionHandle:
                     await self._answer_kas_hooks_request(msg)
                     continue
 
+                self._note_mcp_sign_in_status(msg)
+
                 # Dispatch by method
                 action = self._classify(msg)
 
@@ -4761,6 +4782,19 @@ class AcpSessionHandle:
         self._mcp_report.include_configured(required)
         deadline = time.monotonic() + timeout
         stale = max(0, stale_report_frames)
+        self._mcp_sign_in_deferred = True
+        try:
+            await self._wait_mcp_ready_loop(readiness, deadline, timeout, stale)
+        finally:
+            self._mcp_sign_in_deferred = False
+        for name in required:
+            self._mcp_report.record_event(EVENT_MCP_SERVER_INITIALIZED, name)
+        self._offer_mcp_sign_in()
+
+    async def _wait_mcp_ready_loop(
+        self, readiness: KasMcpReadiness, deadline: float, timeout: float, stale: int
+    ) -> None:
+        """The frame loop of :meth:`wait_mcp_ready`; raises on failure or timeout."""
         while readiness.pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -4789,11 +4823,57 @@ class AcpSessionHandle:
             readiness.record(msg)
             if readiness.failure:
                 raise AcpRuntimeError(f"KAS managed MCP initialization failed: {readiness.failure}")
-        for name in required:
-            self._mcp_report.record_event(EVENT_MCP_SERVER_INITIALIZED, name)
+
+    def _note_mcp_sign_in_status(self, msg: JsonRpcMessage) -> None:
+        """Track which of this session's servers need an OAuth sign-in.
+
+        Read from this session's own ``_kiro/mcp/status`` snapshots. A server is
+        added on ``failedAuthorization`` and removed once it connects, is
+        disabled, or leaves the snapshot. Then a sign-in is offered.
+
+        Bounded like the session's MCP report reads the same frame: at most
+        ``BUCKET_CAP`` entries, and a name over ``NAME_CAP`` is skipped rather
+        than truncated, because a cut name names a server the engine does not
+        have.
+        """
+        if not msg.is_method(METHOD_KAS_MCP_STATUS) or not self._owns_mcp_frame(msg):
+            return
+        servers = msg.params.get("servers")
+        if not isinstance(servers, list):
+            return
+        present: set[str] = set()
+        for server in servers[:BUCKET_CAP]:
+            if not isinstance(server, dict) or not isinstance(server.get("name"), str):
+                continue
+            name = server["name"]
+            if not name or len(name) > NAME_CAP:
+                continue
+            present.add(name)
+            if server.get("failedAuthorization") is True:
+                self._mcp_sign_in_needed.add(name)
+            elif server.get("status") in ("connected", "disabled"):
+                self._mcp_sign_in_needed.discard(name)
+        self._mcp_sign_in_needed &= present
+        self._offer_mcp_sign_in()
+
+    def _offer_mcp_sign_in(self) -> None:
+        """Ask the runtime to start one pending sign-in, if it can take one.
+
+        The server's banner dedupe is cleared first: its earlier link is dead
+        once a new sign-in starts, and the new link must not be dropped as a
+        duplicate.
+        """
+        begin = getattr(self._runtime, "begin_mcp_sign_in", None)
+        if begin is None or not self._session_id or self._mcp_sign_in_deferred:
+            return
+        for name in sorted(self._mcp_sign_in_needed):
+            if begin(self._session_id, name):
+                self._oauth_emitted_servers.discard(name)
+                return
 
     def _apply_init_notification(self, msg: JsonRpcMessage, action: str) -> None:
         """Initialization side effects shared by the drain and readiness barrier."""
+        self._note_mcp_sign_in_status(msg)
         params = msg.params if isinstance(msg.params, dict) else {}
         if action == "update":
             update = params.get("update") or {}
@@ -4819,6 +4899,27 @@ class AcpSessionHandle:
         idle_exit: float = _MCP_DRAIN_IDLE_EXIT,
         no_report_ceiling: float | None = None,
         stale_report_frames: int = 0,
+    ) -> None:
+        """Drain init frames, then offer any MCP sign-in the frames asked for.
+
+        No sign-in starts while the drain runs: a start that fails during the
+        drain is torn down, and must not have started one first.
+        """
+        self._mcp_sign_in_deferred = True
+        try:
+            await self._drain_init_frames(
+                duration, idle_exit, no_report_ceiling, stale_report_frames
+            )
+        finally:
+            self._mcp_sign_in_deferred = False
+        self._offer_mcp_sign_in()
+
+    async def _drain_init_frames(
+        self,
+        duration: float,
+        idle_exit: float,
+        no_report_ceiling: float | None,
+        stale_report_frames: int,
     ) -> None:
         """Drain MCP-init / oauth / config frames from the queue after set_mode.
 

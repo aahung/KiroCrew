@@ -1149,6 +1149,14 @@ history; that history remains available to a later resume. No first prompt is
 sent on these paths. Harnesses without this opt-in retain their existing
 initialization drain.
 
+### KAS MCP OAuth sign-in
+
+A remote OAuth MCP server that KAS cannot reach without a token reports a `failed` status entry with `failedAuthorization: true`. Its `authorizationUrl` comes from a passive connect whose loopback callback listener is already closed, so Crew never renders it. A sign-in that can complete is started by the client: `_kiro/mcp/resetServer` with `{sessionId, serverName, startOAuth: true}` makes the engine keep its callback listener open for the whole connect attempt (the server's connect timeout, 60 s by default) and send the consent URL as a `_kiro/openExternalUrl` request. The engine sends that request only because `KAS_CLIENT_CAPABILITIES` declares `_meta.kiro.openExternalUrl`.
+
+The session handle tracks, from its own status snapshots, which servers need a sign-in: added on `failedAuthorization`, removed once the server connects, is disabled, or leaves the snapshot. A timed-out attempt reports `failedAuthorization: false` with a timeout error, so the server stays tracked and the sign-in is offered again at the start of the next turn. No offer is made while session start is still draining its frames (the managed-readiness barrier or the init drain), because a start that fails there is torn down; the offer is made when the drain ends. The tracker reads at most the report's `BUCKET_CAP` entries and skips a name over `NAME_CAP`.
+
+`_kiro/openExternalUrl` names neither the session nor the server, so the runtime runs at most one sign-in per process (`AcpRuntime.begin_mcp_sign_in`), gated on `ACP_BACKENDS_OPEN_EXTERNAL_URL`. The slot is held until the reset is answered, even after its session unregisters, so a departed session's late link is refused rather than handed to a newer sign-in; the slot's own timeout sits past the engine's 600 s connect ceiling. The URL is put on the owning session's queue as an ordinary `_kiro.dev/mcp/oauth_request` frame and answered `{success: true}`; it therefore takes the same URL checks and the same Authorize banner as the kiro-cli engine's own request. It is refused with a JSON-RPC error when no sign-in is in flight, when the owning session is gone, or when the URL is not http(s); the engine raises on that error, so the attempt ends at once instead of waiting for a callback no user was shown. `secretStorage` is not declared, so the engine keeps the resulting grant in its own memory: Crew stores no MCP token, and a new KAS process needs a new sign-in.
+
 ## Key APIs
 
 | Method | Purpose |

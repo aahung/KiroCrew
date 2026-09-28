@@ -297,7 +297,13 @@ async def _pod_up(name: str) -> dict:
     # Resolve the node toolchain off the loop before building the pod env:
     # `pod up` runs the provision chain (npm ci + vite) when asked to.
     await runtime._warm_build_path()
+    cfg = runtime._load_cfg()
     cmd = runtime._find_cli() + ["pod", "up", name, "--json"]
+    # A sandboxed child has its own user namespace, which the pod refuses to
+    # certify as the local owner. Let the gateway mint only when it has config;
+    # otherwise the CLI owns the whole operation (including Windows pods).
+    if cfg is not None:
+        cmd.append("--no-token")
     rc, stdout, stderr = await runtime._run_cmd(
         cmd, cwd=repository._repo(), env=_pod_env(), timeout=180
     )
@@ -307,7 +313,6 @@ async def _pod_up(name: str) -> dict:
     # pod is up. Confirm the unit is actually active, else fail closed rather
     # than flash a false "started" — the same false-success class as a false
     # "stopped", in the opposite direction.
-    cfg = runtime._load_cfg()
     if runtime._POD_AVAILABLE and cfg:
         try:
             loop = asyncio.get_running_loop()
@@ -320,9 +325,29 @@ async def _pod_up(name: str) -> dict:
                 "error": f"cannot verify pod start: {runtime._redact(str(exc))}",
             }
     try:
-        return {"ok": True, **json.loads(stdout)}
+        handle = json.loads(stdout)
     except ValueError:
-        return {"ok": True, "output": stdout}
+        handle = {"output": stdout}
+    # Use the same config that selects --no-token, so boot and mint cannot
+    # disagree about which process supplies the credential.
+    if cfg is not None:
+        token = ""
+        try:
+            loop = asyncio.get_running_loop()
+            token = await loop.run_in_executor(
+                subprocess_executor(), runtime.rt.mint_token, cfg, name, "2h"
+            )
+        except runtime.rt.PodOwnershipUnproven as exc:
+            # Like the CLI, report the healthy pod but withhold its credential.
+            handle["warning"] = f"pod is up but token withheld: {runtime._redact(str(exc))}"
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": f"pod is up but token mint failed: {runtime._redact(str(exc))}",
+            }
+        handle["token"] = token
+    handle["ok"] = True
+    return handle
 
 
 async def _pod_down(name: str) -> dict:

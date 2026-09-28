@@ -37,6 +37,8 @@ export interface PendingQuestion {
 }
 export interface PendingApproval {
   id: string
+  /** Minted per request by the coordinator; echoed so a stale card cannot resolve a reused id. */
+  instance?: string
   request_mid?: string
   slot?: string
   source?: string

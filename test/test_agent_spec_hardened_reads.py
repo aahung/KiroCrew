@@ -1278,6 +1278,8 @@ _EXPECTED_PARSED_SPECS_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
     # the label its per-file hardened read carried.
     "kiro_crew/config/loader.py": [("load_config", "unknown")],
     "kiro_crew/dashboard/handlers/_shared.py": [("skills_loaded_by_agents", "dashboard")],
+    # Export/import warn about crew rows whose template this machine lacks.
+    "kiro_crew/portability.py": [("portability", "dashboard")],
 }
 
 

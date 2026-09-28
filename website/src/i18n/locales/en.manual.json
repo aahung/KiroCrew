@@ -5744,7 +5744,9 @@
         "invalid_archive": "Invalid archive",
         "network_error": "Network error",
         "network_error_during_preview": "Network error during preview",
-        "mode": "Mode"
+        "mode": "Mode",
+        "export_templates_not_included": "This export doesn't include the agent templates your crews use: {{names}}. Copy them from ~/.kiro/agents to the same folder on the other machine.",
+        "import_templates_missing": "Some crews use an agent template this machine doesn't have (crew → template): {{crews}}. Copy the missing templates into ~/.kiro/agents before you use these crews."
       },
       "usageTab": {
         "credits": "Credits",

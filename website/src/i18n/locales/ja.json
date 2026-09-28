@@ -12821,7 +12821,9 @@
         "replace_mode_will_overwrite_existing_data_contin": "置換モードは既存のデータを上書きします。続行しますか？",
         "skills": "スキル:",
         "upload_a_kirocrew_export_zip_to_restore_settings": "{{productName}} エクスポート zip をアップロードして、このインスタンスの設定を復元します。\n          既存のデータはデフォルトでマージされます (重複はスキップされます)。",
-        "workspace_files": "ワークスペースファイル:"
+        "workspace_files": "ワークスペースファイル:",
+        "export_templates_not_included": "このエクスポートには、クルーが使うエージェントテンプレートが含まれていません: {{names}}。~/.kiro/agents から、もう一方のマシンの同じフォルダーにコピーしてください。",
+        "import_templates_missing": "このマシンにないエージェントテンプレートを使うクルーがあります (クルー → テンプレート): {{crews}}。これらのクルーを使う前に、足りないテンプレートを ~/.kiro/agents にコピーしてください。"
       },
       "promptsTab": {
         "agent_sop_name": "@agent-sop:name",

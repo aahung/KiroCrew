@@ -13019,7 +13019,9 @@
         "replace_mode_will_overwrite_existing_data_contin": "প্রতিস্থাপন মোড বিদ্যমান ডেটার ওপরে লিখে দেবে। চালিয়ে যাবেন?",
         "skills": "স্কিল:",
         "upload_a_kirocrew_export_zip_to_restore_settings": "এই ইনস্ট্যান্সে সেটিংস পুনরুদ্ধার করতে একটি {{productName}} এক্সপোর্ট zip আপলোড করুন।\n          ডিফল্টভাবে বিদ্যমান ডেটার সঙ্গে মার্জ করা হবে (ডুপ্লিকেট বাদ দেওয়া হয়)।",
-        "workspace_files": "ওয়ার্কস্পেস ফাইল:"
+        "workspace_files": "ওয়ার্কস্পেস ফাইল:",
+        "export_templates_not_included": "এই এক্সপোর্টে তোমার ক্রু যেসব এজেন্ট টেমপ্লেট ব্যবহার করে সেগুলো নেই: {{names}}। এগুলো ~/.kiro/agents থেকে অন্য মেশিনের একই ফোল্ডারে কপি করো।",
+        "import_templates_missing": "কিছু ক্রু এমন এজেন্ট টেমপ্লেট ব্যবহার করে যা এই মেশিনে নেই (ক্রু → টেমপ্লেট): {{crews}}। এই ক্রুগুলো ব্যবহারের আগে বাদ পড়া টেমপ্লেটগুলো ~/.kiro/agents-এ কপি করো।"
       },
       "promptsTab": {
         "agent_sop_name": "@agent-sop:name",

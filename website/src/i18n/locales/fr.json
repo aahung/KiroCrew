@@ -13217,7 +13217,9 @@
         "replace_mode_will_overwrite_existing_data_contin": "Le mode Remplacer écrasera les données existantes. Continuer ?",
         "skills": "Compétences :",
         "upload_a_kirocrew_export_zip_to_restore_settings": "Importez un zip d'export {{productName}} pour restaurer les paramètres sur cette instance.\n          Les données existantes seront fusionnées par défaut (les doublons sont ignorés).",
-        "workspace_files": "Fichiers de l'espace de travail :"
+        "workspace_files": "Fichiers de l'espace de travail :",
+        "export_templates_not_included": "Cet export n'inclut pas les modèles d'agent utilisés par tes équipes : {{names}}. Copie-les depuis ~/.kiro/agents vers le même dossier sur l'autre machine.",
+        "import_templates_missing": "Certaines équipes utilisent un modèle d'agent absent de cette machine (équipe → modèle) : {{crews}}. Copie les modèles manquants dans ~/.kiro/agents avant d'utiliser ces équipes."
       },
       "promptsTab": {
         "agent_sop_name": "@agent-sop:name",

@@ -26,7 +26,9 @@ from pathlib import Path, PurePath, PurePosixPath
 
 from kiro_crew import crew_teams, pinned_fs, platform_compat
 from kiro_crew._sqlite_compat import sqlite3
-from kiro_crew.config.paths import config_dir
+from kiro_crew.agent_discovery import parsed_agent_specs
+from kiro_crew.agent_files import OWNED_KIRO_AGENT_FILES
+from kiro_crew.config.paths import config_dir, kiro_agents_dir
 from kiro_crew.mcp_cron import _log_cron_denial, _vet_shell_command
 from kiro_crew.member_memory_backup import hold_stores_for_read
 from kiro_crew.memory_stores import MEMORY_STORES_DIR_NAME, is_host_local_store_state
@@ -420,6 +422,87 @@ def _add_from_fd(zf: zipfile.ZipFile, fd: int, arcname: str) -> None:
         zf.open(info, "w", force_zip64=True) as dest,
     ):
         shutil.copyfileobj(src, dest)
+
+
+_MANAGED_TEMPLATES = frozenset(Path(name).stem for name in OWNED_KIRO_AGENT_FILES)
+
+#: The template warnings ride a response header (export) and a summary (import), so
+#: both are bounded: at most this many names, each cut to this many characters.
+MAX_TEMPLATE_WARNINGS = 20
+MAX_TEMPLATE_NAME_CHARS = 64
+
+
+def _clip(name: str) -> str:
+    if len(name) <= MAX_TEMPLATE_NAME_CHARS:
+        return name
+    return name[: MAX_TEMPLATE_NAME_CHARS - 1] + "\u2026"
+
+
+def crew_template_refs(config_path: Path) -> list[tuple[str, str]]:
+    """``(crew, kiro_agent)`` for each crew row in *config_path* that names a template.
+
+    The two config-level selectors that also name a template, ``agent.default_agent``
+    and ``session.pool_agent``, are listed under those keys in place of a crew name.
+    A bundle never carries ``<kiro home>/agents``, so every name listed here must
+    already exist on whichever machine applies the config. The templates Kiro Crew
+    writes itself (``OWNED_KIRO_AGENT_FILES``) are left out: every install
+    regenerates them. An unreadable, malformed or pathologically nested file
+    answers ``[]``: this feeds a warning, never a refusal.
+    """
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        rows = data.get("agents")
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return []
+    named = [
+        (str(crew), row.get("kiro_agent"))
+        for crew, row in (rows.items() if isinstance(rows, dict) else ())
+        if isinstance(row, dict)
+    ]
+    for section, key in (("agent", "default_agent"), ("session", "pool_agent")):
+        block = data.get(section)
+        if isinstance(block, dict):
+            named.append((f"{section}.{key}", block.get(key)))
+    return sorted(
+        (holder, template)
+        for holder, template in named
+        if isinstance(template, str) and template and template not in _MANAGED_TEMPLATES
+    )
+
+
+def unbundled_agent_templates() -> tuple[list[str], int]:
+    """The agent templates this install's crews name -- none of them ride an export.
+
+    Returns ``(names, more)``: at most :data:`MAX_TEMPLATE_WARNINGS` clipped names,
+    and how many further names were left out.
+    """
+    names = sorted({template for _crew, template in crew_template_refs(_mc_dir() / "config.json")})
+    kept = names[:MAX_TEMPLATE_WARNINGS]
+    return [_clip(n) for n in kept], len(names) - len(kept)
+
+
+def missing_crew_templates(config_path: Path) -> tuple[list[dict[str, str]], int]:
+    """Crew rows in *config_path* whose ``kiro_agent`` template is not installed here.
+
+    Returns ``(rows, more)``, bounded like :func:`unbundled_agent_templates`.
+
+    Matches a spec by its ``name`` field or file stem, the same test the config
+    loader applies when it resolves a crew's template.
+    """
+    refs = crew_template_refs(config_path)
+    if not refs:
+        return [], 0
+    installed: set[str] = set()
+    for data, path in parsed_agent_specs(
+        kiro_agents_dir(), operation="portability", source="dashboard"
+    ):
+        installed.add(path.stem)
+        if isinstance(data, dict) and isinstance(data.get("name"), str):
+            installed.add(data["name"])
+    missing = [(crew, template) for crew, template in refs if template not in installed]
+    kept = missing[:MAX_TEMPLATE_WARNINGS]
+    rows = [{"crew": _clip(crew), "kiro_agent": _clip(template)} for crew, template in kept]
+    return rows, len(missing) - len(kept)
 
 
 def create_export_zip() -> tuple[bytes, dict]:
@@ -1117,4 +1200,17 @@ def apply_import_zip(zip_path: Path, mode: str = "merge") -> dict:
                         shutil.copy2(str(item), str(target))
                 summary["items"].append("skills (merged, auto/ skipped)")
 
+    # Warn, never refuse: the rows are already written, and a template can be
+    # installed afterwards without importing again.
+    try:
+        missing, more = missing_crew_templates(mc / "config.json")
+    except Exception:  # RecursionError included
+        # The import is already written: a spec this cannot read costs the warning,
+        # never the import's success.
+        logger.warning("Could not check crew agent templates after import", exc_info=True)
+        missing, more = [], 0
+    if missing:
+        summary["missing_agent_templates"] = missing
+    if more:
+        summary["missing_agent_templates_more"] = more
     return summary

@@ -13217,7 +13217,9 @@
         "replace_mode_will_overwrite_existing_data_contin": "La modalità di sostituzione sovrascriverà i dati esistenti. Continuare?",
         "skills": "Skill:",
         "upload_a_kirocrew_export_zip_to_restore_settings": "Carica uno zip di esportazione di {{productName}} per ripristinare le impostazioni su questa istanza.\n          I dati esistenti vengono uniti per impostazione predefinita (i duplicati vengono saltati).",
-        "workspace_files": "File del workspace:"
+        "workspace_files": "File del workspace:",
+        "export_templates_not_included": "Questa esportazione non include i modelli di agente usati dalle tue crew: {{names}}. Copiali da ~/.kiro/agents nella stessa cartella sull'altra macchina.",
+        "import_templates_missing": "Alcune crew usano un modello di agente che su questa macchina non c'è (crew → modello): {{crews}}. Copia i modelli mancanti in ~/.kiro/agents prima di usare queste crew."
       },
       "promptsTab": {
         "agent_sop_name": "@agent-sop:name",

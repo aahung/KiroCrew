@@ -13019,7 +13019,9 @@
         "replace_mode_will_overwrite_existing_data_contin": "Der Ersetzungsmodus überschreibt bestehende Daten. Fortfahren?",
         "skills": "Skills:",
         "upload_a_kirocrew_export_zip_to_restore_settings": "Laden Sie eine {{productName}}-Export-ZIP hoch, um Einstellungen auf dieser Instanz wiederherzustellen.\n          Bestehende Daten werden standardmäßig zusammengeführt (Duplikate werden übersprungen).",
-        "workspace_files": "Workspace-Dateien:"
+        "workspace_files": "Workspace-Dateien:",
+        "export_templates_not_included": "Dieser Export enthält die Agent-Vorlagen deiner Crews nicht: {{names}}. Kopiere sie aus ~/.kiro/agents in denselben Ordner auf dem anderen Rechner.",
+        "import_templates_missing": "Einige Crews nutzen eine Agent-Vorlage, die es auf diesem Rechner nicht gibt (Crew → Vorlage): {{crews}}. Kopiere die fehlenden Vorlagen nach ~/.kiro/agents, bevor du diese Crews nutzt."
       },
       "promptsTab": {
         "agent_sop_name": "@agent-sop:name",

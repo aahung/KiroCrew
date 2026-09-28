@@ -69,12 +69,43 @@ def _url_payload_command(n: int) -> str:
 #: launch-approval directory and ``mcp/resolved``: gatewayd spawns an approved stub's
 #: backend outside the sandbox, so a session must not be able to write either path.
 #:
+#: Raised again, from 27,761, for the write-protected home entry covering the kiro-cli
+#: global MCP registry (``~/.kiro/settings/mcp.json``) and its ``KIRO_HOME``
+#: re-anchoring: an ``autoApprove`` on an entry there is honoured by default and skips
+#: the tool gate entirely, while the entry that decides it is admitted on its name
+#: shape rather than on who wrote the file -- so an agent-writable registry grants its
+#: own verbs a standing bypass. The reasoning for one leaf is most of the cost, which
+#: is the shape every entry on this tier has.
+#:
+#: Raised again, from 27,809, for resolving the ``$HOME``-rooted form of both kiro-cli
+#: write-tier leaves rather than only their ``KIRO_HOME`` copies. Anchoring them
+#: lexically covered a symlinked ``$HOME`` itself but not one further down the path, so
+#: a dotfile-managed ``~/.kiro`` left the real spec dir and the real MCP registry outside
+#: the fence while their ``~``-spelled paths stayed inside it. The cost is the reasoning
+#: plus one shared tuple, which is what replaces a second per-leaf arm.
+#:
+#: The same raise covers emitting the kiro-cli targets in both separator spellings. An
+#: arm anchored on an env-var root carries the operator's own spelling into the set:
+#: ``KIRO_HOME=C:/Users/x`` joins to a mixed-separator target while a candidate reaches
+#: the matcher all-backslash, and the two never compared equal -- so the gate stopped
+#: covering its own targets on Windows. One helper beside ``_anchor_both_separators``,
+#: which documents the identical trap for a root-and-leaf pair.
+#:
+#: Raised again, from 27,864, because that helper covered the kiro-cli arms only while
+#: the same single-spelling emission stayed in the two sibling arms that anchor
+#: ``KIROCREW_HOME`` and the adapter roots -- both env-var roots, so both carried the
+#: defect the helper exists for, and a fix on one arm rebuilds the hole beside itself.
+#: All four emissions now go through the helper, and a test refuses a bare ``add`` of a
+#: joined target so a later arm cannot reopen it. The cost is that test plus the
+#: corrected reasoning, which replaces a premise that named the candidate side rather
+#: than the root side as the mismatch.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 27_761
+_PACKAGE_LINE_BUDGET = 27_874
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

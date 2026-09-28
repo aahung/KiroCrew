@@ -1796,7 +1796,7 @@ class TestTheDoctorReadOfMaskedCredentialAliases:
             source.index("_materialize_maskable_dirs("),
             source.index("_materialize_md_notebook_mask_targets("),
             source.index("_materialize_live_target_mask_target("),
-            source.index("_refuse_aliased_masked_leaves()"),
+            source.index("_refuse_aliased_masked_leaves("),
         ]
         assert order == sorted(order), "the alias pass must run last"
 
@@ -2500,6 +2500,10 @@ class TestADanglingSymlinkRefusesTheSpawn:
     and POSIX has no unlink-only-if-still-a-symlink to close that window with.
     """
 
+    @pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="a write through a dangling link creates the referent on Linux; Darwin raises ELOOP",
+    )
     def test_the_unguarded_chain_really_is_exploitable(self, crew_home):
         """Pin the mechanism itself, so the refusal below is not guarding a phantom."""
         target = crew_home / "computer_use.json"

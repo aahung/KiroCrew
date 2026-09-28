@@ -10,7 +10,8 @@ import ErrorNotice from '../components/ErrorNotice'
 import { Btn, Input, Badge, EmptyState, PageHeader } from '../components/ui'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import MessageErrorBoundary from '../components/MessageErrorBoundary'
-import AgentSelector from '../components/AgentSelector'
+import AgentSelector, { type KiroCrewAgent } from '../components/AgentSelector'
+import { agentDisplayLabel } from '../utils/agentLabel'
 import { useAgents } from '../hooks/useAgents'
 import { useImeGuard } from '../hooks/useImeGuard'
 import { useMenuKeyboard, menuItemsOf } from '../hooks/useMenuKeyboard'
@@ -268,8 +269,11 @@ export function MessageBubble({ msg, agents, onReply, onOpenThread, onApprove }:
 
 const LISTEN_MODES: Array<ChannelAgent['listenMode']> = ['all', 'mention', 'silent']
 
-function AgentControlRow({ agent, onDismiss, onListenChange, onClearContext }: {
-  agent: ChannelAgent; onDismiss: () => void; onListenChange: (m: ChannelAgent['listenMode']) => void; onClearContext: () => void
+function AgentControlRow({ agent, roster, onDismiss, onListenChange, onClearContext }: {
+  /** The roster to resolve the stored crew handle against, or `undefined`
+   *  while it is still loading: the subtitle is held rather than flashing the
+   *  raw `member_id` before the display name arrives. */
+  agent: ChannelAgent; roster: readonly KiroCrewAgent[] | undefined; onDismiss: () => void; onListenChange: (m: ChannelAgent['listenMode']) => void; onClearContext: () => void
 }) {
   const [menu, setMenu] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -319,34 +323,38 @@ function AgentControlRow({ agent, onDismiss, onListenChange, onClearContext }: {
   }, [menu])
 
   return (
-    <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-bg-hover group">
-      <Badge variant={STATE_BADGE[agent.state]?.variant || 'warn'}>{STATE_BADGE[agent.state]?.label || agent.state}</Badge>
-      <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium text-text truncate">{agent.role}</div>
-        {agent.agentName && <div className="text-[11px] text-muted font-mono truncate">{agent.agentName}</div>}
-        <div className="relative inline-block" ref={menuRef}>
-          <Btn ref={triggerRef} onClick={() => setMenu(!menu)} aria-haspopup="menu" aria-expanded={menu} className="!p-0 !border-none !rounded-none text-[13px] text-muted hover:text-text">
-            <Badge variant={LISTEN_BADGE[agent.listenMode]?.variant || 'warn'}>{LISTEN_BADGE[agent.listenMode]?.label || agent.listenMode}</Badge>
-          </Btn>
-          {menu && <div role="menu" ref={menuListRef} aria-label={i18nT('pages.channelPage.listen_mode')} className="absolute top-full left-0 mt-1 bg-bg-elevated border border-border rounded-md shadow-lg z-10">
-            {LISTEN_MODES.map(m => (
-              <Btn key={m} role="menuitemradio" aria-checked={m === agent.listenMode}
-                onClick={() => {
-                  onListenChange(m); setMenu(false)
-                  // Activation is an explicit dismissal too: the row that has
-                  // focus is being unmounted, so restore to the trigger rather
-                  // than dropping focus on <body>.
-                  triggerRef.current?.focus()
-                }}
-                className={`!rounded-none block w-full text-left px-3 py-1.5 text-[13px] !border-none ${m === agent.listenMode ? 'text-accent bg-accent/10' : 'text-text hover:bg-bg-hover'}`}>
-                <Badge variant={LISTEN_BADGE[m]?.variant || 'warn'}>{LISTEN_BADGE[m]?.label || m}</Badge>
-              </Btn>
-            ))}
-          </div>}
-        </div>
+    <div className="px-2 py-1.5 rounded-lg hover:bg-bg-hover group">
+      <div className="flex items-center gap-2">
+        <Badge variant={STATE_BADGE[agent.state]?.variant || 'warn'}>{STATE_BADGE[agent.state]?.label || agent.state}</Badge>
+        <div className="flex-1 min-w-0 text-sm font-medium text-text truncate">{agent.role}</div>
+        {alive && <Btn onClick={onClearContext} aria-label={i18nT('pages.channelPage.clear_context')} title={i18nT('pages.channelPage.clear_context')}><RotateCcw className="lucide-inline" /></Btn>}
+        <Btn onClick={onDismiss} aria-label={i18nT('pages.channelPage.dismiss')} danger title={i18nT('pages.channelPage.dismiss')}><X className="lucide-inline" /></Btn>
       </div>
-      {alive && <Btn onClick={onClearContext} aria-label={i18nT('pages.channelPage.clear_context')} title={i18nT('pages.channelPage.clear_context')}><RotateCcw className="lucide-inline" /></Btn>}
-      <Btn onClick={onDismiss} aria-label={i18nT('pages.channelPage.dismiss')} danger title={i18nT('pages.channelPage.dismiss')}><X className="lucide-inline" /></Btn>
+      {/* The resolved crew name is what tells two rows apart, so it gets the row's
+          full width beneath the title line and wraps, instead of the sliver the
+          state badge and the icon buttons leave beside them (where it truncated to
+          "Cr..." and was legible only through a mouse-only tooltip). */}
+      {agent.agentName && roster && <div className="text-[11px] text-muted break-words">{agentDisplayLabel(agent.agentName, roster)}</div>}
+      <div className="relative inline-block" ref={menuRef}>
+        <Btn ref={triggerRef} onClick={() => setMenu(!menu)} aria-haspopup="menu" aria-expanded={menu} className="!p-0 !border-none !rounded-none text-[13px] text-muted hover:text-text">
+          <Badge variant={LISTEN_BADGE[agent.listenMode]?.variant || 'warn'}>{LISTEN_BADGE[agent.listenMode]?.label || agent.listenMode}</Badge>
+        </Btn>
+        {menu && <div role="menu" ref={menuListRef} aria-label={i18nT('pages.channelPage.listen_mode')} className="absolute top-full left-0 mt-1 bg-bg-elevated border border-border rounded-md shadow-lg z-10">
+          {LISTEN_MODES.map(m => (
+            <Btn key={m} role="menuitemradio" aria-checked={m === agent.listenMode}
+              onClick={() => {
+                onListenChange(m); setMenu(false)
+                // Activation is an explicit dismissal too: the row that has
+                // focus is being unmounted, so restore to the trigger rather
+                // than dropping focus on <body>.
+                triggerRef.current?.focus()
+              }}
+              className={`!rounded-none block w-full text-left px-3 py-1.5 text-[13px] !border-none ${m === agent.listenMode ? 'text-accent bg-accent/10' : 'text-text hover:bg-bg-hover'}`}>
+              <Badge variant={LISTEN_BADGE[m]?.variant || 'warn'}>{LISTEN_BADGE[m]?.label || m}</Badge>
+            </Btn>
+          ))}
+        </div>}
+      </div>
     </div>
   )
 }
@@ -606,6 +614,29 @@ export default function ChannelPage() {
   // it 2px -- a column that cannot hold one character per line.
   const { isMobile, showList, showDetail, openDetail, closeDetail } = useListDetailView()
   const [showAddAgent, setShowAddAgent] = useState(false)
+  const dispatch = useAppDispatch()
+  // The roster the agent rail resolves each role's stored crew handle against:
+  // a role added from the picker stores the crew's `member_id`, and the rail
+  // shows the crew's display name, not that id. Until the catalog has answered
+  // the rail has no roster at all, so the subtitle waits instead of showing
+  // the id for a frame on every visit. A catalog that FAILED is not a roster
+  // either: `settled` flips on the rejection too, with the rows still empty,
+  // and resolving through an empty roster would print the raw id as if it
+  // were the name. The failure is rendered in the rail (below) with a Retry,
+  // like the add-agent form's picker; a failed REFRESH keeps the rows it had.
+  const {
+    agents: rosterRows,
+    settled: rosterSettled,
+    error: rosterError,
+    reload: reloadRoster,
+    reloading: rosterReloading,
+  } = useAgents(0)
+  const roster = rosterSettled && (!rosterError || rosterRows.length > 0) ? rosterRows : undefined
+  // Recover every roster consumer, not just this rail -- see SchedulePage's note.
+  const recoverRoster = useCallback(() => {
+    reloadRoster()
+    dispatch(triggerRefresh())
+  }, [reloadRoster, dispatch])
   const [loading, setLoading] = useState(true)
   /** The last channel-list read was refused, so an empty list is unknown, not empty. */
   const [listFailed, setListFailed] = useState(false)
@@ -944,8 +975,26 @@ export default function ChannelPage() {
                   <Btn onClick={() => setShowAgents(false)} aria-label={i18nT('pages.channelPage.close_agents_panel')} className="!p-0 !border-none !rounded-none text-muted hover:text-text text-sm"><X className="lucide-inline" /></Btn>
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                  {/* The roster the rows below resolve their labels through
+                      failed to load, so each row shows no name at all until a
+                      retry lands. Same report and Retry as the picker in the
+                      add-agent form; hidden while that form is open, which
+                      renders the same failure itself. */}
+                  {rosterError && !showAddAgent && (
+                    <div className="flex flex-col gap-2 mb-1" data-testid="channel-roster-error">
+                      {/* Only the crew NAMES failed -- the participant rows below come from the
+                          channel itself and are live -- so the copy names exactly that, and the
+                          message sits above its actions instead of wrapping beside them. */}
+                      <ErrorNotice variant="inline" message={i18nT('pages.channelPage.roster_names_failed')} askAgent />
+                      <div>
+                        <Btn onClick={recoverRoster} disabled={rosterReloading} aria-busy={rosterReloading}>
+                          {rosterReloading ? i18nT('components.agentSelector.retrying') : i18nT('components.agentSelector.retry')}
+                        </Btn>
+                      </div>
+                    </div>
+                  )}
                   {channel.agents.map((agent) => (
-                    <AgentControlRow key={agent.id} agent={agent}
+                    <AgentControlRow key={agent.id} agent={agent} roster={roster}
                       onDismiss={() => handleDismiss(agent.id)}
                       onListenChange={m => handleListenChange(agent.id, m)}
                       onClearContext={async () => {

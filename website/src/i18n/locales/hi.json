@@ -10039,7 +10039,8 @@
       "failed_to_dismiss_agent": "एजेंट हटाने में विफल",
       "failed_to_update_agent": "एजेंट अपडेट करने में विफल",
       "failed_to_close_channel": "चैनल बंद करने में विफल",
-      "failed_to_clear_context": "संदर्भ साफ़ करने में विफल"
+      "failed_to_clear_context": "संदर्भ साफ़ करने में विफल",
+      "roster_names_failed": "क्रू के नाम लोड नहीं हो सके।"
     },
     "chat": {
       "activityViewer": {

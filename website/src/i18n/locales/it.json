@@ -10182,7 +10182,8 @@
       "failed_to_dismiss_agent": "Rimozione dell'agente non riuscita",
       "failed_to_update_agent": "Aggiornamento dell'agente non riuscito",
       "failed_to_close_channel": "Chiusura del canale non riuscita",
-      "failed_to_clear_context": "Cancellazione del contesto non riuscita"
+      "failed_to_clear_context": "Cancellazione del contesto non riuscita",
+      "roster_names_failed": "Impossibile caricare i nomi della crew."
     },
     "chat": {
       "activityViewer": {

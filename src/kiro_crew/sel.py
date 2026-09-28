@@ -733,33 +733,48 @@ class SecurityEventLog:
         # Resolved only now, after the same-process join above has had its
         # chance: the join path must stay free of filesystem work, and this
         # call does a mkdir.
-        lock_path, lock_may_create = self._chain_lock_target()
-        # A sidecar that is a LINK is not a lock. If the path resolves elsewhere,
-        # replacing its target hands two writers locks on different inodes — the
-        # exact fork this serialization exists to prevent — so a link planted
-        # before this code ran must be refused, not followed. O_NOFOLLOW makes
-        # that atomic on POSIX (no TOCTOU window between checking and opening);
-        # the explicit probe carries Windows junctions, which O_NOFOLLOW does not
-        # exist for. This is the same defense _load_or_create_hmac_key already
-        # applies to this directory.
-        if platform_compat.is_link_or_junction(lock_path):
-            raise OSError(
-                f"SEL chain-lock sidecar {lock_path} is a link; refusing to lock it"
+        lock_path, lock_may_create, lock_dir_fd = self._chain_lock_target()
+        try:
+            # A sidecar that is a LINK is not a lock. If the path resolves elsewhere,
+            # replacing its target hands two writers locks on different inodes — the
+            # exact fork this serialization exists to prevent — so a link planted
+            # before this code ran must be refused, not followed. O_NOFOLLOW makes
+            # that atomic on POSIX (no TOCTOU window between checking and opening);
+            # the explicit probe carries Windows junctions, which O_NOFOLLOW does not
+            # exist for. This is the same defense _load_or_create_hmac_key already
+            # applies to this directory.
+            if platform_compat.is_link_or_junction(lock_path):
+                raise OSError(
+                    f"SEL chain-lock sidecar {lock_path} is a link; refusing to lock it"
+                )
+            # Windows' CRT text mode strips a trailing 0x1A while opening a file
+            # for update. The fallback lock path can be the raw HMAC key, so this
+            # descriptor must be binary even though the lock code never writes it.
+            # O_CREAT only on the sidecar: creating the fallback would leave a
+            # 0-byte file at the legacy KEY path, which the migration block would
+            # then promote over the real key and destroy it.
+            #
+            # Opened RELATIVE to the pinned directory where the platform has
+            # directory descriptors, so the directory screened in
+            # ``_chain_lock_target`` is the directory this sidecar is opened
+            # inside: a ``trust`` replaced after that screen cannot redirect this
+            # open into another tree, where both writers' screens would pass while
+            # they locked different inodes.
+            flags = (
+                (os.O_CREAT if lock_may_create else 0)
+                | os.O_RDWR
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_BINARY", 0)
             )
-        # Windows' CRT text mode strips a trailing 0x1A while opening a file
-        # for update. The fallback lock path can be the raw HMAC key, so this
-        # descriptor must be binary even though the lock code never writes it.
-        # O_CREAT only on the sidecar: creating the fallback would leave a
-        # 0-byte file at the legacy KEY path, which the migration block would
-        # then promote over the real key and destroy it.
-        fd = os.open(
-            lock_path,
-            (os.O_CREAT if lock_may_create else 0)
-            | os.O_RDWR
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_BINARY", 0),
-            0o600,
-        )
+            if lock_dir_fd is not None:
+                fd = os.open(lock_path.name, flags, 0o600, dir_fd=lock_dir_fd)
+            else:
+                fd = os.open(lock_path, flags, 0o600)
+        finally:
+            if lock_dir_fd is not None:
+                # The descriptor's whole job was to anchor the open above; the
+                # locked fd carries the identity from here on.
+                os.close(lock_dir_fd)
         joined: _ChainHold | None = None
         unlock: Callable[[], None] | None = None
         try:
@@ -854,29 +869,67 @@ class SecurityEventLog:
         """
         return self._dir / _TRUST_SUBDIR / _SEL_LOCK_FILE
 
-    def _chain_lock_target(self) -> tuple[Path, bool]:
-        """The file to lock, and whether this call may CREATE it.
+    def _chain_lock_target(self) -> tuple[Path, bool, int | None]:
+        """The file to lock, whether this call may CREATE it, and its pinned dir.
 
-        Resolved at acquire time from facts about the sidecar's directory --
-        whether it can be created, and whether it is a real directory rather
-        than a link -- and never from this process's own key migration state.
-        That distinction is the whole point: a directory's permissions are a
-        property of the filesystem, so every writer on the install reads the
-        same answer and locks the same inode, whereas the key's location varies
-        per process and would fork the chain.
+        On the healthy path this is the sidecar under ``trust``, resolved from
+        facts about that directory -- whether it can be created, and whether it
+        is a real directory rather than a link -- and never from where the HMAC
+        key happens to live. A directory's permissions are a property of the
+        filesystem, so every writer on the install reads the same answer and
+        locks the same inode.
 
-        The fallback is the legacy key file, and ONLY when it already exists.
-        It is the one sibling of the log the sensitive-path deny list has
-        protected all along, and an install that still has it is exactly the
-        install whose trust dir ``_load_or_create_hmac_key`` also could not
-        create, so it is the file every writer there is signing from. Locking
-        is advisory and this fd is never written, so its bytes are safe -- but
+        One condition may send it elsewhere, and the rule every line below
+        serves is that such a condition must be one no actor can flip BETWEEN
+        two writers' acquires. A target that can differ across two concurrent
+        writers is two flocks on two inodes, which is the forked chain this
+        serialization exists to prevent.
+
+        The fallback is the legacy key file, and ONLY when THIS process already
+        resolved its HMAC key there -- ``self._hmac_key_file``, decided once in
+        ``_load_or_create_hmac_key`` and never re-read. That is the install-wide
+        fact the fallback has always been argued from: a process signing at the
+        legacy location is one whose trust dir that method could not create or
+        could not migrate out of, so the legacy key is the file every writer
+        there is signing from and the one the deny list has protected all along.
+
+        The file's mere EXISTENCE cannot be that gate, which is the trap this
+        signature closes. ``sel_hmac.key`` is a sandbox read-write leaf
+        (``sandbox.py``'s ``_CREW_SANDBOX_VISIBLE_LEAVES``, alongside ``trust``),
+        so the audited agent can create one on a perfectly healthy install --
+        and the lock path never reads its bytes, so any content will do. Gating
+        on existence therefore let that agent arm the fallback at will, then
+        refuse one writer's acquire below and leave it locking the legacy key
+        while its sibling locked the sidecar: two flocks on two inodes, which
+        forks the chain permanently and makes ``verify_integrity`` report honest
+        later records as tampered. Keying on the resolved path instead means a
+        planted file buys nothing, because it does not move where this process
+        signs.
+
+        Locking is advisory and this fd is never written, so its bytes are safe -- but
         the open must not pass ``O_CREAT``: a created-on-demand key file is a
         0-byte one, and the migration block would promote that over a real key
         and destroy it. Retrying the mkdir on every append is deliberate and
         cheap next to the alternative of dropping every best-effort audit and
         denying every critical action on an install that is otherwise signing
         fine.
+
+        The third element is a PINNED descriptor for the sidecar's directory
+        (``None`` for the legacy fallback, whose parent is the operator's log
+        directory -- a directory the sandbox grants no entry for, unlike the
+        ``trust`` leaf below it -- and ``None`` where the platform has no
+        directory descriptors). The caller opens the sidecar RELATIVE to it, so
+        the directory screened below is the directory the sidecar is opened
+        inside -- see :func:`_pin_lock_dir` for why the by-name screen alone
+        cannot give that. Ownership passes to the caller, which closes it once
+        the sidecar is open.
+
+        The legacy FILE is itself a read-write leaf, so on an install signing
+        there the agent can replace it between two acquires and reach the same
+        fork. That is deliberately not defended here: an agent that can rewrite
+        the key signing the chain can forge any MAC on it directly, which is
+        strictly more than forking it, so a lock-side screen would buy nothing
+        that the key's own protection has not already lost.
         """
         lock_path = self._chain_lock_path()
         try:
@@ -903,14 +956,17 @@ class SecurityEventLog:
             # home reached through a symlink, a crew dir moved to another volume
             # -- which the agent cannot plant, so refusing on one buys no
             # protection and costs the whole log: the refusal below routes into
-            # the legacy-key fallback, and an install with no legacy key gets
-            # every best-effort audit dropped and every critical operation
-            # denied while nothing is actually wrong.
+            # the legacy-key fallback, and an install NOT signing at the legacy
+            # location gets every best-effort audit dropped and every critical
+            # operation denied while nothing is actually wrong.
             #
             # Raising here routes into the same fallback an uncreatable
-            # directory takes: the deny-list-protected legacy key when one
-            # exists, and otherwise the failure, which is the same
-            # fail-soft/fail-closed split as the key path's.
+            # directory takes: the legacy key when this process already SIGNS
+            # there, and otherwise the failure, which is the same
+            # fail-soft/fail-closed split as the key path's. Both of these are
+            # filesystem facts every writer reads alike, which is why they may
+            # select a target at all -- see the pin below for the refusal that
+            # may not.
             if platform_compat.is_link_or_junction(lock_path.parent):
                 raise OSError(
                     f"SEL chain-lock directory {lock_path.parent} is a link; "
@@ -921,15 +977,32 @@ class SecurityEventLog:
             # here would quietly undo it.
             lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         except OSError:
-            legacy_key = self._dir / _HMAC_KEY_FILE
-            if legacy_key.exists():
-                return legacy_key, False
-            # No deny-list-protected file to fall back to: the chain cannot be
-            # serialized, and ``_flush_batch`` turns that into a rollback or a
-            # denied critical audit. Inventing a lock elsewhere would be worse
-            # than failing, because an unserialized append forks the chain.
+            # Only an install already SIGNING at the legacy location may switch
+            # targets, and that is decided once at init rather than per acquire,
+            # so every writer on the install reads one answer for its whole life.
+            if self._hmac_key_file == self._dir / _HMAC_KEY_FILE:
+                return self._hmac_key_file, False, None
+            # Otherwise the chain cannot be serialized, and ``_flush_batch``
+            # turns that into a rollback or a denied critical audit. Inventing a
+            # lock elsewhere would be worse than failing, because an
+            # unserialized append forks the chain.
             raise
-        return lock_path, True
+        # Pinned AFTER the fallback decision, and deliberately OUTSIDE it. The
+        # two refusals above are properties of the filesystem that every writer
+        # on the install reads alike; this one is the opposite by construction --
+        # ``_pin_lock_dir`` raises exactly when it catches ``trust`` being
+        # REPLACED mid-acquire, which is per-acquire and agent-triggerable, so it
+        # can be true for one writer and false for the next. Routing it into the
+        # fallback would hand those two writers different inodes on an install
+        # whose trust dir is perfectly healthy, which is the fork this whole
+        # serialization exists to prevent. A detected swap has exactly one safe
+        # answer: fail the acquire, and let the audit-or-deny contract decide.
+        #
+        # Pinning here is still before anything opens the sidecar, so the
+        # descriptor's guarantee is unchanged: everything after resolves through
+        # it, and a later replacement of the name cannot move the sidecar into
+        # another directory between one writer's acquire and the next.
+        return lock_path, True, _pin_lock_dir(lock_path.parent)
 
     @contextlib.contextmanager
     def _chain_hold_relabel(self, kind: str) -> Iterator[None]:
@@ -1392,26 +1465,52 @@ class SecurityEventLog:
         # pre-existing one at the new path. Skipped when trust-dir creation
         # above already fell back to the legacy location.
         if key_path != legacy_path and legacy_path.exists():
-            # A legacy file too short to BE a key never wins over a destination
-            # that holds a usable one. The unconditional rule below rests on the
-            # two files carrying the same bytes, and a file that cannot load as a
-            # key carries none: promoting it destroys the only copy of the key
-            # that signed every existing record, and the >= length check further
-            # down then fails init on every boot after that, so the loss is
-            # unrecoverable rather than merely wrong. A mixed-binary window is
-            # enough to produce such a file -- a writer that derives its chain
-            # lock from the key location opens it with ``O_CREAT`` and leaves a
-            # 0-byte one behind once a sibling has relocated the real key. The
-            # narrow shape is deliberate: only this one pairing is skipped, so a
-            # genuine legacy key still wins over a pre-existing destination file,
-            # and a short legacy file with no usable destination still reaches
-            # the length check exactly as it does without this guard.
+            # ── The one shape this migration refuses to resolve on its own ──
+            # A legacy file too short to BE a key, sitting beside a destination
+            # that loads as one, is AMBIGUOUS, and neither half of the ambiguity
+            # may be acted on:
+            #
+            # * Promoting the short legacy file destroys the only copy of the key
+            #   that signed every existing record, and the >= length check below
+            #   then fails init on every later boot, so the loss is unrecoverable.
+            #   A mixed-binary window produces exactly this shape benignly -- a
+            #   writer deriving its chain lock from the key location opens it with
+            #   ``O_CREAT`` and leaves a 0-byte file behind once a sibling has
+            #   relocated the real key.
+            # * ADOPTING the destination is no safer, and this is the half that
+            #   cannot be repaired by measuring harder. ``_trust_root_key_loads``
+            #   is a stat -- regular file, >= the minimum length -- and length is
+            #   not trust: an agent holding the sandbox's read-write leaves can
+            #   truncate the legacy key below the minimum AND plant a long-enough
+            #   destination whose bytes it knows. Every source that could tell the
+            #   planted key from the real one -- the destination itself, the
+            #   legacy key, ``security_events.jsonl`` and ``security_events.d``
+            #   -- is read-WRITE for that same agent (``sandbox.py``'s
+            #   ``_CREW_SANDBOX_VISIBLE_LEAVES``), so a check against any of them
+            #   authenticates the attacker's own evidence. Making the audit log
+            #   the anchor is the worst of those, because a forged newest row
+            #   turns a fail-closed check into adoption of a key the attacker
+            #   knows, and every SEL and session-identity MAC signed afterwards is
+            #   forgeable with no recovery path.
+            #
+            # With no operator-protected source to authenticate against, the only
+            # correct move is to do NOTHING and refuse: nothing is adopted,
+            # nothing is overwritten, both files survive for the operator, and an
+            # install that reached this state by the benign route is recovered by
+            # hand rather than by a guess that a planted key satisfies equally.
+            # Every other pairing falls through to the unconditional rule below,
+            # exactly as it did before this guard existed.
             if not _trust_root_key_loads(legacy_path) and _trust_root_key_loads(key_path):
-                logger.warning(  # nosemgrep: python-logger-credential-disclosure
-                    "legacy SEL HMAC key %s is too short to be a key; keeping the "
-                    "usable key at %s instead of promoting it",
-                    legacy_path,
-                    key_path,
+                raise RuntimeError(
+                    f"legacy SEL HMAC key {legacy_path} is too short to be a key "
+                    f"while a loadable key sits at {key_path}. This install cannot "
+                    "tell a half-finished key relocation from a planted key, because "
+                    "every file that could prove the difference is writable by the "
+                    "audited agent. Refusing to promote the short legacy key (that "
+                    "would destroy the key signing the existing chain) and refusing "
+                    "to adopt the key at the destination. Restore the correct key "
+                    f"from backup, or remove both {legacy_path} and {key_path} to "
+                    "start a fresh chain with a new key."
                 )
             else:
                 # The legacy key WINS over any pre-existing destination file.
@@ -3535,6 +3634,67 @@ def sel_is_warm() -> bool:
     """
     inst = SecurityEventLog._instance
     return inst is not None and bool(getattr(inst, "_initialized", False))
+
+
+def _pin_lock_dir(path: Path) -> int | None:
+    """Pin the directory the chain-lock sidecar is opened inside.
+
+    The write-side analog of :func:`_open_segment_dir`. Screening the directory
+    BY NAME and then creating/opening the sidecar through that same name are
+    separate syscalls, and ``trust`` is a read-write leaf for the audited agent
+    (it is the one component below the log directory the sandbox grants), so the
+    agent can replace the directory in that window. Both writers' checks then
+    pass while their opens land in DIFFERENT directories, giving them flocks on
+    different inodes -- the forked chain this serialization exists to prevent,
+    and one the by-name screen cannot see because each writer's own check was
+    truthful when it ran.
+
+    A descriptor closes the window: it names an inode, not a path, so the
+    directory the sidecar is finally opened inside IS the one screened here, and
+    a later swap of the name cannot redirect that open. Judged the same three
+    ways as the read side, for the same reasons:
+
+    - ``O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK`` refuses a link at the open
+      itself, so a link swapped in after the caller's ``is_link_or_junction``
+      probe fails here rather than being followed.
+    - ``fstat`` on the DESCRIPTOR requires a directory, which nothing can swap
+      afterwards.
+    - The descriptor's identity must equal what the name's ``lstat`` reports
+      right now, so a swap landing between the two fails closed.
+
+    Returns ``None`` where the platform has no directory descriptors (Windows),
+    which leaves the caller's junction probe as that platform's only screen --
+    the same split :class:`_SegmentDirPin` already carries. Raises ``OSError``
+    on a refusal, so the caller routes it into the legacy-key fallback exactly
+    as it routes an uncreatable directory: refusing outright would drop every
+    best-effort audit on an install that is otherwise signing fine.
+    """
+    if not _PIN_BY_FD_SUPPORTED:
+        return None
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        named = os.lstat(path)
+    except OSError:
+        os.close(fd)
+        raise
+    if not stat.S_ISDIR(opened.st_mode):
+        os.close(fd)
+        raise OSError(f"SEL chain-lock directory {path} is not a directory")
+    if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+        os.close(fd)
+        raise OSError(
+            f"SEL chain-lock directory {path} is not the directory its name "
+            "points at (replaced mid-acquire?); refusing to create the sidecar "
+            "under it"
+        )
+    return fd
 
 
 def _trust_root_key_loads(path: Path) -> bool:

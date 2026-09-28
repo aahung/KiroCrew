@@ -3193,12 +3193,25 @@ def _replay_pending(state: "DashboardState", slot_key: str) -> bool | None:
     ``None`` rather than ``False`` when the session store cannot answer, because the
     two have opposite consequences for the caller: an unknown window must not license
     the mapping read that a known-closed one does.
+
+    A slot with NO live session is one of those unknown answers, and asking for it
+    explicitly is what makes the tri-state real.
+    ``SessionRegistry.provider_switch_replay_pending`` is ``bool(session is not None
+    and session.provider_switch_replay)``, so a missing session and a live one that
+    owes nothing both come back ``False`` -- and only ``False`` licenses the mapping.
+    That collapse points at the very case the licence is least safe in: the mapping
+    keeps answering a dropped id after a session closes, and a cold start has not
+    written one yet, so the id it names is most likely to be the older generation
+    exactly when there is nobody to ask about replay.
     """
     try:
         sessions = getattr(state, "sessions", None)
         if sessions is None:
             return None
-        return bool(sessions.provider_switch_replay_pending(f"dashboard:{slot_key}"))
+        key = f"dashboard:{slot_key}"
+        if not sessions.has_session(key):
+            return None
+        return bool(sessions.provider_switch_replay_pending(key))
     except Exception:
         logger.debug("replay state for %s could not be read", slot_key, exc_info=True)
         return None
@@ -3215,6 +3228,63 @@ def _slot_opened_sid(state: "DashboardState", slot_key: str) -> str:
     except Exception:
         logger.debug("opened crew log for %s could not be read", slot_key, exc_info=True)
         return ""
+
+
+def _slot_object(state: "DashboardState", slot_key: str) -> "object | None":
+    """The live slot OBJECT for *slot_key*, or ``None``, for an identity comparison.
+
+    Every other read here is by key, and a key is not an identity: a slot can close and
+    a new session can reopen under the same key, which no key-only check can tell from
+    the original. Captured before a suspension and compared after, the object itself
+    can.
+    """
+    try:
+        return state._slots.get(slot_key)
+    except Exception:
+        logger.debug("slot object for %s could not be read", slot_key, exc_info=True)
+        return None
+
+
+def _freshest_sid(
+    state: "DashboardState", slot_key: str, resolved: str, observed: "object | None"
+) -> str:
+    """*resolved*, refreshed from the slot's own record when that has moved since.
+
+    SYNCHRONOUS on purpose, and that is the whole reason it exists separately from
+    :func:`_recorded_sid_of`. That resolver has to suspend -- it reads the durable
+    store -- so a verb resolves its ids BEFORE the final authorization, and the
+    authorization's own config warm suspends as well. A slot that opens its next
+    store inside that hop advances its ``_crew_log_opened_sid``
+    (``Slot.take_crew_log_previous``), and the id resolved before the hop then names
+    the store that slot has just replaced. Written into an append-only
+    ``session/adopted`` or ``session/released`` entry, that is the same permanent
+    wrong answer this resolver exists to prevent, arriving one hop later.
+
+    Re-reading the slot's own record is enough to close the window because it is the
+    resolver's FIRST preference and the only one of its three sources that can move
+    during the hop: the durable store and the mapping are consulted only when that
+    record is empty, and neither is more current than a statement this process just
+    wrote about which store the slot is on.
+
+    A dict lookup and an attribute read, so it belongs after the final
+    authorization, where nothing may suspend -- refreshing before that gate would
+    leave the same window open behind it.
+
+    An empty slot record keeps *resolved*: a slot that CLOSED during the hop does not
+    make the store's answer about which log it was on wrong, and falling back to
+    ``""`` there would drop an id that is still the best available one.
+
+    *observed* is the slot object read when *resolved* was resolved, and refreshing is
+    conditional on it still being the slot under that key. A key is not an identity: a
+    close plus a reopen under the SAME key inside the hop puts a different session's
+    object there, and its opened-store record names a lineage that never held the
+    target -- so refreshing from it would replace a right answer with a confident wrong
+    one. Together with the empty-record rule above this makes the refresh never worse
+    than not refreshing: it moves an id only when the same slot moved it.
+    """
+    if observed is None or _slot_object(state, slot_key) is not observed:
+        return resolved
+    return _slot_opened_sid(state, slot_key) or resolved
 
 
 async def _recorded_sid_of(state: "DashboardState", slot_key: str) -> str:
@@ -3362,6 +3432,12 @@ async def adopt_target(
                 )
             # Resolve ids before the final authorization because nothing may suspend between
             # that authorization and handing the append to the writer.
+            #
+            # The slot OBJECTS are captured first, before the resolution's own store read
+            # suspends, so the identity check covers every suspension between reading an id
+            # and writing it -- not just the gate's.
+            caller_at_resolve = _slot_object(state, caller_key)
+            previous_at_resolve = _slot_object(state, previous_parent) if previous_parent else None
             parent_sid = await _recorded_sid_of(state, caller_key)
             previous_parent_sid = (
                 await _recorded_sid_of(state, previous_parent) if previous_parent else ""
@@ -3390,6 +3466,16 @@ async def adopt_target(
                     status=409,
                     code="tree_unavailable",
                 )
+            # REFRESHED here, synchronously, for the same reason the resolutions happen
+            # before the gate: the gate's own warm suspends, and either of these slots can
+            # open its next store inside that hop -- leaving the id above naming the store
+            # it has just replaced, in an entry nothing later corrects.
+            parent_sid = _freshest_sid(state, caller_key, parent_sid, caller_at_resolve)
+            previous_parent_sid = (
+                _freshest_sid(state, previous_parent, previous_parent_sid, previous_at_resolve)
+                if previous_parent
+                else ""
+            )
             settled, landed = _tree_append_waiter(slot.key)
             crew_log_emit.on_session_adopted(
                 target_sid,
@@ -3500,7 +3586,9 @@ async def release_target(
                     code="not_parent",
                 )
             # Resolve the id before the final authorization because nothing may suspend
-            # between that authorization and handing the append to the writer.
+            # between that authorization and handing the append to the writer. The slot
+            # object is captured first, for the reason the adoption captures its two.
+            previous_at_resolve = _slot_object(state, previous_parent)
             previous_parent_sid = await _recorded_sid_of(state, previous_parent)
             # RE-AUTHORIZED inside the lock, for the reason the adoption re-authorizes:
             # the wait is unbounded and everything the gate reads can move during it.
@@ -3522,6 +3610,11 @@ async def release_target(
                     status=409,
                     code="tree_unavailable",
                 )
+            # Refreshed here, synchronously, for the reason the adoption refreshes: the
+            # gate's warm suspends, and the parent can open its next store inside it.
+            previous_parent_sid = _freshest_sid(
+                state, previous_parent, previous_parent_sid, previous_at_resolve
+            )
             settled, landed = _tree_append_waiter(slot.key)
             crew_log_emit.on_session_released(
                 target_sid,

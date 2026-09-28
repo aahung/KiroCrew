@@ -32,8 +32,11 @@ from kiro_crew.subprocess_utf8 import UTF8_TEXT
 #: which in a process that has served no turn is nothing at all.
 #:
 #: ``sessions`` stands in for the live registry, which genuinely does not exist here: no
-#: session is running, so nothing owes replay. Its mapping half is the REAL
-#: ``SessionMap``, reading the real file, because that is the source under test.
+#: session is running, so nothing owes replay and no slot HAS a session -- which is why
+#: ``has_session`` answers False rather than being left off the stub. Left off, the
+#: resolver's own guard would raise and be absorbed as "unknown", reaching the same
+#: refusal for the wrong reason and hiding it from this test. Its mapping half is the
+#: REAL ``SessionMap``, reading the real file, because that is the source under test.
 _CHILD = """
 import asyncio, json, sys
 from kiro_crew.dashboard import session_control as sc
@@ -47,6 +50,10 @@ class _Sessions:
 
     @staticmethod
     def provider_switch_replay_pending(key):
+        return False
+
+    @staticmethod
+    def has_session(key):
         return False
 
 

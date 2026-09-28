@@ -3190,6 +3190,11 @@ async def _handle_inline_stop(
             resources=session_key,
         )
         return
+    # The orchestrator for THIS click, pinned once: the stop callbacks below run
+    # later, from the session manager, and must not re-read the module global
+    # (mypy also cannot carry the guard's narrowing into them).
+    orch = _orch
+    sessions = _orch.sessions
 
     sel().log_api_access(
         caller=user_id,
@@ -3200,32 +3205,32 @@ async def _handle_inline_stop(
     )
 
     # Immediate feedback — update the working message to show stopping
-    if _orch.slack and channel and msg_ts:
+    if orch.slack and channel and msg_ts:
         try:
-            await _orch.slack.update_message(channel, msg_ts, text="⏹ _Stopping…_")
+            await orch.slack.update_message(channel, msg_ts, text="⏹ _Stopping…_")
         except Exception:
             pass
 
     async def _on_soft() -> None:
-        if _orch.slack and channel and msg_ts:
+        if orch.slack and channel and msg_ts:
             try:
-                await _orch.slack.update_message(channel, msg_ts, text="⏹ Execution stopped.")
+                await orch.slack.update_message(channel, msg_ts, text="⏹ Execution stopped.")
             except Exception:
                 pass
 
     async def _on_hard() -> None:
-        if _orch.slack and channel and msg_ts:
+        if orch.slack and channel and msg_ts:
             try:
-                await _orch.slack.update_message(
+                await orch.slack.update_message(
                     channel, msg_ts, text="⛔ Execution stopped — session reset."
                 )
             except Exception:
                 pass
 
-    outcome = await _orch.sessions.stop_turn(session_key, on_soft=_on_soft, on_hard=_on_hard)
-    if outcome == "idle" and _orch.slack and channel and msg_ts:
+    outcome = await sessions.stop_turn(session_key, on_soft=_on_soft, on_hard=_on_hard)
+    if outcome == "idle" and orch.slack and channel and msg_ts:
         try:
-            await _orch.slack.update_message(channel, msg_ts, text="⏹ Nothing running.")
+            await orch.slack.update_message(channel, msg_ts, text="⏹ Nothing running.")
         except Exception:
             pass
     sel().log_tool_invocation(
@@ -3655,6 +3660,8 @@ async def _handle_review_revise_submit(payload: dict) -> None:
     """Take revision feedback, send to LLM with draft context, post new ephemeral draft."""
     if not _orch or not _orch.slack:
         return
+    # Pinned for the fire-and-forget task below (see ``_handle_inline_stop``).
+    orch = _orch
     # Inbound channels-governance gate (same rationale as the edit-submit handler):
     # a hot-reload deny after the modal opened must stop a revise from driving a
     # new LLM turn + posting on the denied Slack channel.
@@ -3715,20 +3722,20 @@ async def _handle_review_revise_submit(payload: dict) -> None:
     async def _do_revise() -> None:
         try:
             await handle_message(
-                _orch.slack,  # type: ignore[arg-type]
-                _orch.sessions,  # type: ignore[arg-type]
+                orch.slack,  # type: ignore[arg-type]
+                orch.sessions,  # type: ignore[arg-type]
                 channel,
                 revision_prompt,
                 thread_ts,
                 thread_ts,  # msg_ts = thread_ts for revision
                 caller,
                 approval_mode=APPROVAL_INTERACTIVE,
-                context_builder=_orch.ctx_builder,
-                cron_service=_orch.cron_svc,
-                conversation_log=_orch.conv_log,
-                consolidator=_orch.consolidator,
-                subagent_manager=_orch.subagent_mgr,
-                task_runner=_orch.task_runner,
+                context_builder=orch.ctx_builder,
+                cron_service=orch.cron_svc,
+                conversation_log=orch.conv_log,
+                consolidator=orch.consolidator,
+                subagent_manager=orch.subagent_mgr,
+                task_runner=orch.task_runner,
                 channel_activation=ACTIVATION_REVIEW,
             )
             logger.info("Review revision requested by %s in %s", caller, channel)

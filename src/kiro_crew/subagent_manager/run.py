@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         extract_options,
         failure_name,
         fire_tool_hooks,
+        hold_heavy_command,
         hook_gate_kwargs,
         identity_grant_covers_child,
         is_registered_agent_name,
@@ -1953,6 +1954,36 @@ class RunEventCoordinator(ManagerComponent):
                     await asyncio.sleep(delay)
                     msg = _TRANSIENT_CONTINUE_MSG if _had_activity else full_message
 
+        async def _grant(
+            client: Any,
+            request_id: str | int,
+            session_key: str,
+            event: LLMEvent,
+            *,
+            metadata: dict | None = None,
+            info: SubagentInfo,
+        ) -> None:
+            """Approve a permission request, holding a heavy shell command first.
+
+            Heavy work (a test suite, a build) waits here while host memory is
+            critically low: the start was priced cheap on purpose, so this is
+            where a burst of heavy runs is kept from piling up. The hold sits
+            on the GRANT, after every deny/reject branch and after any human
+            approval, so a request that is refused never waits and an
+            approval card is never withheld. Bounded and fail-open; see
+            ``hold_heavy_command``.
+            """
+            if getattr(event, "is_shell", False):
+                held = await hold_heavy_command(
+                    getattr(event, "shell_command", None),
+                    on_wait=lambda: self._manager._touch_activity(info),
+                )
+                if held > 0:
+                    logger.info("Subagent %s: held a heavy command %.0fs for memory", info.id, held)
+            await self._manager._approve_and_log(
+                client, request_id, session_key, event, metadata=metadata, info=info
+            )
+
         _complete_event: LLMEvent | None = None
         # Wall clock for THIS subagent's own turn. Deliberately started here,
         # at the subagent's own stream, not on the parent side: under session
@@ -2148,7 +2179,7 @@ class RunEventCoordinator(ManagerComponent):
                     # grant instead of stalling a trusted fan-out on an
                     # interactive card per call.
                     if parent_policy == "auto" and event.child_unconditional_grant_eligible:
-                        await self._manager._approve_and_log(
+                        await _grant(
                             client,
                             event.request_id,
                             session_key,
@@ -2174,7 +2205,7 @@ class RunEventCoordinator(ManagerComponent):
                     # Every other hook auto-approve (title, payload kind, command)
                     # stays fail-closed below for a low-fidelity child.
                     if identity_grant_covers_child(tool_result, event):
-                        await self._manager._approve_and_log(
+                        await _grant(
                             client,
                             event.request_id,
                             session_key,
@@ -2234,7 +2265,7 @@ class RunEventCoordinator(ManagerComponent):
                             info._awaiting_approval = False
                             info.last_activity = time.time()
                         if approved:
-                            await self._manager._approve_and_log(
+                            await _grant(
                                 client,
                                 event.request_id,
                                 session_key,
@@ -2275,7 +2306,7 @@ class RunEventCoordinator(ManagerComponent):
                     # not the rarer one.
                     _ng_refusal = await name_grant.refusal_for_event(event)
                     if _ng_refusal is None:
-                        await self._manager._approve_and_log(
+                        await _grant(
                             client,
                             event.request_id,
                             session_key,
@@ -2299,7 +2330,7 @@ class RunEventCoordinator(ManagerComponent):
                         sel_factory=sel,
                     )
                 if parent_policy == "auto":
-                    await self._manager._approve_and_log(
+                    await _grant(
                         client,
                         event.request_id,
                         session_key,
@@ -2325,7 +2356,7 @@ class RunEventCoordinator(ManagerComponent):
                             metadata={"subagent_id": info.id, "reason": "factory_rejected"},
                         )
                         continue
-                    await self._manager._approve_and_log(
+                    await _grant(
                         client,
                         event.request_id,
                         session_key,
@@ -2347,7 +2378,7 @@ class RunEventCoordinator(ManagerComponent):
                             client, event.request_id, session_key, event
                         )
                         continue
-                    await self._manager._approve_and_log(
+                    await _grant(
                         client,
                         event.request_id,
                         session_key,

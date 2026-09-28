@@ -1387,6 +1387,9 @@ async def test_rebase_locked_fetch_failure(monkeypatch):
         return "" if args[0] == "status" else None
 
     monkeypatch.setattr(repository, "_git", fake_git)
+    # The base-branch gate sits before the fetch; these exercise the rebase
+    # mechanics past it, so the base is STATED rather than guessed here.
+    monkeypatch.setattr(repository, "_BASE_BRANCH_POSITIVE", True)
     res = await worktree_ops._rebase_locked({"path": "/r"})
     assert res["ok"] is False
     assert res["error"] == "git fetch origin main failed"
@@ -1398,6 +1401,9 @@ async def test_rebase_locked_success(monkeypatch):
         return "" if args[0] == "status" else "ok"
 
     monkeypatch.setattr(repository, "_git", fake_git)
+    # The base-branch gate sits before the fetch; these exercise the rebase
+    # mechanics past it, so the base is STATED rather than guessed here.
+    monkeypatch.setattr(repository, "_BASE_BRANCH_POSITIVE", True)
     monkeypatch.setattr(runtime, "_run_cmd", AsyncMock(return_value=(0, "", "")))
     monkeypatch.setattr(
         repository, "_git_info", AsyncMock(return_value={"head": "abc1234", "behind": 0})
@@ -1416,6 +1422,9 @@ async def test_rebase_locked_conflict_aborted(monkeypatch):
         return "" if args[0] == "status" else "ok"
 
     monkeypatch.setattr(repository, "_git", fake_git)
+    # The base-branch gate sits before the fetch; these exercise the rebase
+    # mechanics past it, so the base is STATED rather than guessed here.
+    monkeypatch.setattr(repository, "_BASE_BRANCH_POSITIVE", True)
     monkeypatch.setattr(runtime, "_run_cmd", AsyncMock(return_value=(1, "CONFLICT", "in f.py")))
     res = await worktree_ops._rebase_locked({"path": "/r"})
     assert res["ok"] is False and res["conflict"] is True
@@ -1434,6 +1443,9 @@ async def test_rebase_locked_conflict_with_failed_abort(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(repository, "_git", fake_git)
+    # The base-branch gate sits before the fetch; these exercise the rebase
+    # mechanics past it, so the base is STATED rather than guessed here.
+    monkeypatch.setattr(repository, "_BASE_BRANCH_POSITIVE", True)
     monkeypatch.setattr(runtime, "_run_cmd", AsyncMock(return_value=(1, "CONFLICT", "")))
     res = await worktree_ops._rebase_locked({"path": "/r"})
     assert res["conflict"] is True

@@ -2285,6 +2285,13 @@ async def _rebase_locked(target: dict) -> dict:
             **_fields,
             "error": "worktree has uncommitted changes" + _detail,
         }
+    # Before the fetch, and before anything is rewritten: a base branch nobody stated
+    # is a guess, and this is the one operation here that cannot be undone from its own
+    # result -- a clean replay onto the wrong base returns ok and names no rollback.
+    # The dirt gate above already refuses on the cheaper hazard.
+    base_refusal = repository.base_branch_mutation_refusal()
+    if base_refusal is not None:
+        return {"ok": False, "error": base_refusal}
     remote = await repository._upstream_remote()
     if await repository._git(path, "fetch", remote, repository.BASE_BRANCH, timeout=90) is None:
         return {"ok": False, "error": f"git fetch {remote} {repository.BASE_BRANCH} failed"}

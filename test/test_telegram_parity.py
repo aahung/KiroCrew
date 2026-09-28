@@ -1437,8 +1437,87 @@ class TestAgentPicker:
         TelegramDispatcher._prune_pickers(table, now)
         assert "stale" not in table and len(table) <= _MODEL_PICKER_MAX
 
+    @staticmethod
+    def _agent(name: str, filename: str, *, source: str = "builtin", owned: bool = False) -> Any:
+        from kiro_crew.agent_discovery import AgentInfo
 
-class TestUploadGate:
+        return AgentInfo(
+            name=name,
+            filename=filename,
+            description="",
+            model="auto",
+            source=source,
+            kirocrew_owned=owned,
+        )
+
+    def test_internal_and_app_agents_are_hidden_from_the_picker(self) -> None:
+        """The reported harm: KiroCrew internals and app agents occupy slots and
+        push the user's own agents out. Filtering is a property of the roster
+        row, so a user's own ``kirocrew``-prefixed agent (not owned) stays."""
+        from kiro_crew.telegram import transport_dispatch as td
+
+        roster = [
+            # KiroCrew-generated internals — owned, so hidden regardless of source.
+            self._agent("kirocrew", "kirocrew.json", source="kirocrew", owned=True),
+            self._agent("kirocrew-heartbeat", "kirocrew-heartbeat.json", owned=True),
+            self._agent("kirocrew-worker", "kirocrew-worker.json", owned=True),
+            # An app-installed agent: materialised under the "<app>--<agent>.json"
+            # link filename, declared name may be bare.
+            self._agent("companion", "crew-companion--companion.json", source="package"),
+            # A user's OWN agents — the ones the reporter actually uses.
+            self._agent("vitrina-designer", "vitrina-designer.json"),
+            self._agent("vitrina-writer", "vitrina-writer.json"),
+            # A user's hand-authored kirocrew-prefixed agent: NOT owned, so kept.
+            self._agent("kirocrew-custom", "kirocrew-custom.json"),
+            # A genuine AIM package agent the user installed: kept (not an app link).
+            self._agent("customer360", "Customer360Context-customer360.json", source="package"),
+        ]
+        with patch.object(td, "list_agents", lambda: roster):
+            names = td.TelegramDispatcher._installed_agent_names()
+
+        assert names == [
+            "customer360",
+            "kirocrew-custom",
+            "vitrina-designer",
+            "vitrina-writer",
+        ]
+        for hidden in ("kirocrew", "kirocrew-heartbeat", "kirocrew-worker", "companion"):
+            assert hidden not in names
+
+    @pytest.mark.asyncio
+    async def test_truncation_is_surfaced_instead_of_silent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """More selectable agents than fit: the cut must be VISIBLE. A trailing
+        row names how many were dropped, and it is not a pressable ``g:`` index."""
+        from kiro_crew.telegram.transport_dispatch import _PICKER_LIMIT
+
+        dispatcher, client, _ = _dispatcher({1})
+        overflow = 5
+        names = [f"agent{i:03d}" for i in range(_PICKER_LIMIT + overflow)]
+        monkeypatch.setattr(type(dispatcher), "_installed_agent_names", staticmethod(lambda: names))
+        await dispatcher.handle_message(_msg("/agent"))
+        _text, markup = client.sent[-1]
+        rows = markup["inline_keyboard"]
+        labels = [row[0]["text"] for row in rows]
+        notices = [label for label in labels if "not shown" in label]
+        assert notices == [f"… and {overflow} more not shown"]
+        # The notice row is inert: its callback is not a g:<index> the picker
+        # resolves, so a press cannot silently pick an agent.
+        notice_row = next(row for row in rows if "not shown" in row[0]["text"])
+        assert notice_row[0]["callback_data"] == "noop"
+        # Only the LIMIT selectable agents (plus the Default row) are pressable.
+        pressable = [row for row in rows if row[0]["callback_data"].startswith("g:")]
+        assert len(pressable) == _PICKER_LIMIT + 1
+
+    def test_no_truncation_notice_when_agents_fit(self) -> None:
+        dispatcher, _, _ = _dispatcher({1})
+        choices = dispatcher._agent_choices(["alpha", "beta"])
+        # ``_agent_choices`` never carries the notice — it holds only resolvable
+        # rows, so the notice cannot become a pressable index.
+        assert all(label != "" for _v, label in choices)
+        assert not any("not shown" in label for _v, label in choices)
+
     @pytest.mark.asyncio
     async def test_a_channel_native_key_is_allowed(self) -> None:
         dispatcher, _, _ = _dispatcher({1})

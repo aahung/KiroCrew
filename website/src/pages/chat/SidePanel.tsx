@@ -6,7 +6,7 @@ import { usePointerDrag } from '../../hooks/usePointerDrag'
 import { useLongPressReorder } from '../../hooks/useLongPressReorder'
 import { Reorder } from 'framer-motion'
 import { FileText, Bot, Workflow, ScrollText, MessageCircleQuestionMark, TerminalSquare, GitCompare, GitPullRequest, GitBranch, History, Plus, MoreHorizontal, X, Hash, Pen, Columns2, Component, Globe, CircleDot, Folder, Folders, Link as LinkIcon, PanelRight, PanelBottom, Layers, ListTree, Pin } from 'lucide-react'
-import { SidePanelGlyph } from '../../components/SidePanelGlyph'
+import { SidePanelDockHost, SidePanelGlyph } from '../../components/SidePanelGlyph'
 import ActivityViewer from './ActivityViewer'
 import DiffPanel from '../../components/DiffPanel'
 import DetailPanel from '../../components/DetailPanel'
@@ -673,6 +673,7 @@ export default function SidePanel({
   })
 
   return (
+    <SidePanelDockHost value={canDockBottom}>
     <div
       className={`shrink-0 flex flex-col bg-bg overflow-hidden relative ${isBottom ? 'min-w-0 w-full border-t border-border' : 'min-h-0 mt-0 mb-2 border-l border-t border-b border-border rounded-l-xl'}`}
       style={isBottom ? { height: effectiveHeight, maxHeight: '85vh', width: '100%' } : { width: effectiveWidth, maxWidth: '100vw' }}
@@ -880,7 +881,7 @@ export default function SidePanel({
           title={i18nT('pages.chat.sidePanel.close_panel')}
           aria-label={i18nT('pages.chat.sidePanel.close_panel')}
         >
-          <SidePanelGlyph light bottom={isBottom} size={15} />
+          <SidePanelGlyph light size={15} />
         </button>
         )}
         </div>
@@ -1092,6 +1093,7 @@ export default function SidePanel({
         })}
       </div>
     </div>
+    </SidePanelDockHost>
   )
 }
 

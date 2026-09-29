@@ -127,6 +127,7 @@ import { safeGetItem, safeSetItem } from '../../utils/safeStorage'
 import { useMemberProjection, useMemberRosterViews } from '../../state/useMemberProjection'
 import type { RosterView, ActivityView, WakeView } from '../../state/memberProjectionTypes'
 import type { CrewmateIdentity } from '../chat/CrewmateMessage'
+import { SidePanelDockHost } from '../../components/SidePanelGlyph'
 
 /** The crew manager surface — the ONLY write path for member configuration.
  *  The explicit tab wins over CapabilitiesPage's remembered last tab. */
@@ -2382,6 +2383,9 @@ export default function MembersPage() {
     // either — the panel docks FLUSH to the window's right edge, exactly as it
     // does in the chat page's actbar column; the card columns' pr-2 lives on
     // the inner wrapper below.
+    // This page has no bottom row for the side panel, so every panel glyph
+    // in its transcripts draws the right-dock pane.
+    <SidePanelDockHost value={false}>
     <div className="flex h-full min-h-0" data-testid="members-page">
       {/* Card columns (roster + thread) keep the page's original insets. */}
       <div className="flex flex-1 min-w-0 gap-2 pr-2 pb-2">
@@ -3869,5 +3873,6 @@ export default function MembersPage() {
       )}
       <NewCrewmateDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={handleCreated} existingNames={existingNames} />
     </div>
+    </SidePanelDockHost>
   )
 }

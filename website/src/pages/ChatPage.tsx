@@ -332,6 +332,7 @@ import { KnowledgePicker } from './chat/KnowledgePicker'
 import { MessageSquare, Clock, AppWindow, Undo2, Columns2, ExternalLink, X, MoreHorizontal, EyeOff, VenetianMask } from 'lucide-react'
 import { EdgeFade, JumpToBottomButton } from '../app-sdk/ChatScrollChrome'
 import { PanelLeftSolid, PanelLeftLight, PanelRightSolid } from '../components/icons/panels'
+import { SidePanelGlyph } from '../components/SidePanelGlyph'
 
 import InfoTip from '../components/InfoTip'
 import SlotTagPopover from '../components/SlotTagPopover'
@@ -8065,7 +8066,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   title={i18nT('pages.chatPage.open_activity_panel')}
                   aria-label={i18nT('pages.chatPage.open_activity_panel')}
                 >
-                  <PanelRightSolid size={15} />
+                  <SidePanelGlyph size={15} />
                 </Clickable>
               )}
               {!embedMode && splitFeatureEnabled && (splitAnchorForActive && !activeIsSplitAnchor ? (
